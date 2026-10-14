@@ -1,0 +1,746 @@
+// ============================================================================
+// MAPBIOMAS BRAZIL — HEATWAVE VALIDATION AGAINST STATION EVENT LISTS
+// Google Earth Engine Code Editor (JavaScript)
+//
+// PURPOSE
+//   Compare MapBiomas aggregated heatwave products V1 and V2 with station-derived
+//   heatwave event lists for 9 Brazilian capitals.
+//
+// SPATIAL REFERENCE
+//   One FIXED point per city = area-weighted centroid of MapBiomas Collection 11
+//   urban pixels (class 24) in 2025, constrained to the municipality.
+//   If the municipality lookup fails, the code falls back to a buffer around the
+//   city reference coordinate and still computes the centroid of urban pixels.
+//
+// TEMPORAL / EVENT CONVENTION (same convention adopted for the aggregations)
+//   * heatwave_days: days are assigned to the calendar dates on which they occur.
+//   * event_count: a whole event is assigned once, to the period in which it ENDS.
+//   * max_event_duration: maximum duration among complete events ending in period.
+//   * mean_event_duration: mean duration among complete events ending in period.
+//   * events are NEVER split for event_count / max / mean at month/year boundaries.
+//
+// IMPORTANT INTERPRETATION
+//   The station TXT files provide event start/end, duration and maximum temperature,
+//   but do not encode the threshold/climatology metadata used to detect those events.
+//   Therefore this script is a validation/comparison of EVENT RECORDS. Exact
+//   methodological equivalence with MapBiomas V1 or V2 must be documented separately.
+//
+// OUTPUTS
+//   1) Annual comparison table: 9 cities x 41 years (1985–2025)
+//   2) Monthly comparison table: 9 cities x 41 years x 12 months
+//   3) Annual and monthly performance summaries (r, bias, MAE, RMSE)
+//   4) Interactive charts for a selected city / metric
+//   5) Optional CSV export tasks to Google Drive
+//
+// Generated for the MapBiomas climatic-waves workflow.
+// ============================================================================
+
+
+// ============================================================================
+// 1. SETTINGS
+// ============================================================================
+
+var START_YEAR = 1985;
+var END_YEAR = 2025;
+
+var V1_ROOT =
+  'projects/mapbiomas-brazil/assets/DEGRADATION/COLLECTION-11/' +
+  'CLIMATIC_WAVES/heatWaves_agg';
+
+var V2_ROOT =
+  'projects/mapbiomas-brazil/assets/DEGRADATION/COLLECTION-11/' +
+  'CLIMATIC_WAVES/heatWaves_v2_agg';
+
+// MapBiomas Collection 11 — class 24 = urban area.
+// Fixed year avoids moving the sampling point through time.
+var URBAN_ASSET =
+  'projects/mapbiomas-public/assets/brazil/lulc/collection11/' +
+  'mapbiomas_brazil_collection11_coverage_v3';
+var URBAN_YEAR = 2025;
+var URBAN_CLASS = 24;
+
+// MapBiomas auxiliary municipality boundaries (2025).
+// If this asset or CD_GEOCMU lookup is unavailable in your account, set false;
+// the code will then use the city-specific fallback search buffers.
+var USE_MUNICIPAL_LIMITS = true;
+var MUNICIPAL_ASSET =
+  'projects/mapbiomas-workspace/AUXILIAR/municipios_2025';
+var MUNICIPAL_CODE_FIELD = 'CD_GEOCMU';
+
+// Aggregated heatwave grid is ERA5-Land-like (~11.1 km).
+var SAMPLE_SCALE = 11132;
+
+// Create Drive CSV export tasks when Run is pressed.
+var CREATE_EXPORT_TASKS = true;
+
+var METRICS = [
+  'heatwave_days',
+  'event_count',
+  'max_event_duration',
+  'mean_event_duration'
+];
+
+var DAY_MS = 24 * 60 * 60 * 1000;
+
+
+// ============================================================================
+// 2. CITY METADATA + STATION EVENTS
+// ============================================================================
+
+// The lon/lat coordinates below are ONLY fallback search anchors.
+// The final sampling point is the urban-area centroid calculated in section 4.
+var CITY_META = [{"city_id":"brasilia","city":"Brasília","ibge_code":"5300108","lon":-47.8825,"lat":-15.7942,"radius_km":45},{"city_id":"curitiba","city":"Curitiba","ibge_code":"4106902","lon":-49.2733,"lat":-25.4284,"radius_km":35},{"city_id":"goiania","city":"Goiânia","ibge_code":"5208707","lon":-49.2643,"lat":-16.6869,"radius_km":35},{"city_id":"manaus","city":"Manaus","ibge_code":"1302603","lon":-60.0217,"lat":-3.119,"radius_km":40},{"city_id":"porto_alegre","city":"Porto Alegre","ibge_code":"4314902","lon":-51.23,"lat":-30.0346,"radius_km":35},{"city_id":"salvador","city":"Salvador","ibge_code":"2927408","lon":-38.5014,"lat":-12.973,"radius_km":30},{"city_id":"sao_paulo","city":"São Paulo","ibge_code":"3550308","lon":-46.6333,"lat":-23.5505,"radius_km":50},{"city_id":"belem","city":"Belém","ibge_code":"1501402","lon":-48.4902,"lat":-1.4558,"radius_km":35},{"city_id":"belo_horizonte","city":"Belo Horizonte","ibge_code":"3106200","lon":-43.9378,"lat":-19.9167,"radius_km":40}];
+
+var STATION_EVENT_ROWS = [{"city_id":"brasilia","start":"1963-03-15","end":"1963-03-21","duration":7,"temp_max":32.0,"start_ms":-214617600000,"end_ms":-214099200000},{"city_id":"brasilia","start":"1963-04-01","end":"1963-04-06","duration":6,"temp_max":31.0,"start_ms":-213148800000,"end_ms":-212716800000},{"city_id":"brasilia","start":"1963-11-19","end":"1963-12-03","duration":15,"temp_max":32.5,"start_ms":-193104000000,"end_ms":-191894400000},{"city_id":"brasilia","start":"1963-12-07","end":"1963-12-12","duration":6,"temp_max":33.7,"start_ms":-191548800000,"end_ms":-191116800000},{"city_id":"brasilia","start":"1968-10-30","end":"1968-11-10","duration":12,"temp_max":33.3,"start_ms":-36979200000,"end_ms":-36028800000},{"city_id":"brasilia","start":"1969-01-03","end":"1969-01-10","duration":8,"temp_max":32.6,"start_ms":-31363200000,"end_ms":-30758400000},{"city_id":"brasilia","start":"1969-02-26","end":"1969-03-04","duration":7,"temp_max":32.1,"start_ms":-26697600000,"end_ms":-26179200000},{"city_id":"brasilia","start":"1973-01-04","end":"1973-01-14","duration":11,"temp_max":32.4,"start_ms":94953600000,"end_ms":95817600000},{"city_id":"brasilia","start":"1974-02-17","end":"1974-02-22","duration":6,"temp_max":30.6,"start_ms":130291200000,"end_ms":130723200000},{"city_id":"brasilia","start":"1977-03-07","end":"1977-03-17","duration":11,"temp_max":31.4,"start_ms":226540800000,"end_ms":227404800000},{"city_id":"brasilia","start":"1977-03-23","end":"1977-03-28","duration":6,"temp_max":30.4,"start_ms":227923200000,"end_ms":228355200000},{"city_id":"brasilia","start":"1977-08-07","end":"1977-08-14","duration":8,"temp_max":30.9,"start_ms":239760000000,"end_ms":240364800000},{"city_id":"brasilia","start":"1980-08-21","end":"1980-08-26","duration":6,"temp_max":32.2,"start_ms":335664000000,"end_ms":336096000000},{"city_id":"brasilia","start":"1981-02-27","end":"1981-03-04","duration":6,"temp_max":31.5,"start_ms":352080000000,"end_ms":352512000000},{"city_id":"brasilia","start":"1987-01-12","end":"1987-01-17","duration":6,"temp_max":31.2,"start_ms":537408000000,"end_ms":537840000000},{"city_id":"brasilia","start":"1987-08-11","end":"1987-08-17","duration":7,"temp_max":31.0,"start_ms":555638400000,"end_ms":556156800000},{"city_id":"brasilia","start":"1999-03-25","end":"1999-03-31","duration":7,"temp_max":30.0,"start_ms":922320000000,"end_ms":922838400000},{"city_id":"brasilia","start":"2002-11-25","end":"2002-12-06","duration":12,"temp_max":33.1,"start_ms":1038182400000,"end_ms":1039132800000},{"city_id":"brasilia","start":"2003-12-10","end":"2003-12-17","duration":8,"temp_max":31.8,"start_ms":1071014400000,"end_ms":1071619200000},{"city_id":"brasilia","start":"2010-05-14","end":"2010-05-25","duration":12,"temp_max":29.8,"start_ms":1273795200000,"end_ms":1274745600000},{"city_id":"brasilia","start":"2010-06-18","end":"2010-06-23","duration":6,"temp_max":28.9,"start_ms":1276819200000,"end_ms":1277251200000},{"city_id":"brasilia","start":"2013-02-12","end":"2013-02-18","duration":7,"temp_max":31.1,"start_ms":1360627200000,"end_ms":1361145600000},{"city_id":"brasilia","start":"2015-08-20","end":"2015-08-27","duration":8,"temp_max":32.6,"start_ms":1440028800000,"end_ms":1440633600000},{"city_id":"brasilia","start":"2015-09-01","end":"2015-09-07","duration":7,"temp_max":34.4,"start_ms":1441065600000,"end_ms":1441584000000},{"city_id":"brasilia","start":"2015-09-20","end":"2015-09-28","duration":9,"temp_max":35.8,"start_ms":1442707200000,"end_ms":1443398400000},{"city_id":"brasilia","start":"2015-10-01","end":"2015-10-06","duration":6,"temp_max":35.3,"start_ms":1443657600000,"end_ms":1444089600000},{"city_id":"brasilia","start":"2015-10-08","end":"2015-10-22","duration":15,"temp_max":36.4,"start_ms":1444262400000,"end_ms":1445472000000},{"city_id":"brasilia","start":"2015-11-03","end":"2015-11-14","duration":12,"temp_max":34.5,"start_ms":1446508800000,"end_ms":1447459200000},{"city_id":"brasilia","start":"2015-11-21","end":"2015-11-27","duration":7,"temp_max":31.8,"start_ms":1448064000000,"end_ms":1448582400000},{"city_id":"brasilia","start":"2015-12-07","end":"2015-12-12","duration":6,"temp_max":33.5,"start_ms":1449446400000,"end_ms":1449878400000},{"city_id":"brasilia","start":"2015-12-14","end":"2015-12-19","duration":6,"temp_max":32.5,"start_ms":1450051200000,"end_ms":1450483200000},{"city_id":"brasilia","start":"2016-02-16","end":"2016-03-02","duration":16,"temp_max":31.3,"start_ms":1455580800000,"end_ms":1456876800000},{"city_id":"brasilia","start":"2016-03-18","end":"2016-03-24","duration":7,"temp_max":31.3,"start_ms":1458259200000,"end_ms":1458777600000},{"city_id":"brasilia","start":"2016-03-27","end":"2016-04-26","duration":31,"temp_max":31.6,"start_ms":1459036800000,"end_ms":1461628800000},{"city_id":"brasilia","start":"2016-05-07","end":"2016-05-20","duration":14,"temp_max":31.6,"start_ms":1462579200000,"end_ms":1463702400000},{"city_id":"brasilia","start":"2016-05-29","end":"2016-06-13","duration":16,"temp_max":31.6,"start_ms":1464480000000,"end_ms":1465776000000},{"city_id":"brasilia","start":"2016-07-07","end":"2016-07-23","duration":17,"temp_max":30.8,"start_ms":1467849600000,"end_ms":1469232000000},{"city_id":"brasilia","start":"2016-09-14","end":"2016-09-20","duration":7,"temp_max":34.9,"start_ms":1473811200000,"end_ms":1474329600000},{"city_id":"brasilia","start":"2017-01-05","end":"2017-01-11","duration":7,"temp_max":32.2,"start_ms":1483574400000,"end_ms":1484092800000},{"city_id":"brasilia","start":"2017-03-06","end":"2017-03-12","duration":7,"temp_max":31.8,"start_ms":1488758400000,"end_ms":1489276800000},{"city_id":"brasilia","start":"2017-05-30","end":"2017-06-09","duration":11,"temp_max":29.2,"start_ms":1496102400000,"end_ms":1496966400000},{"city_id":"brasilia","start":"2017-10-21","end":"2017-10-26","duration":6,"temp_max":33.5,"start_ms":1508544000000,"end_ms":1508976000000},{"city_id":"brasilia","start":"2018-07-30","end":"2018-08-04","duration":6,"temp_max":29.8,"start_ms":1532908800000,"end_ms":1533340800000},{"city_id":"brasilia","start":"2019-01-30","end":"2019-02-04","duration":6,"temp_max":32.0,"start_ms":1548806400000,"end_ms":1549238400000},{"city_id":"brasilia","start":"2019-11-09","end":"2019-11-15","duration":7,"temp_max":33.4,"start_ms":1573257600000,"end_ms":1573776000000},{"city_id":"brasilia","start":"2020-01-10","end":"2020-01-16","duration":7,"temp_max":31.3,"start_ms":1578614400000,"end_ms":1579132800000},{"city_id":"brasilia","start":"2020-08-15","end":"2020-08-20","duration":6,"temp_max":31.8,"start_ms":1597449600000,"end_ms":1597881600000},{"city_id":"brasilia","start":"2020-10-02","end":"2020-10-10","duration":9,"temp_max":36.4,"start_ms":1601596800000,"end_ms":1602288000000},{"city_id":"brasilia","start":"2021-05-25","end":"2021-05-30","duration":6,"temp_max":28.6,"start_ms":1621900800000,"end_ms":1622332800000},{"city_id":"brasilia","start":"2021-09-05","end":"2021-09-16","duration":12,"temp_max":33.7,"start_ms":1630800000000,"end_ms":1631750400000},{"city_id":"brasilia","start":"2022-05-29","end":"2022-06-03","duration":6,"temp_max":29.0,"start_ms":1653782400000,"end_ms":1654214400000},{"city_id":"brasilia","start":"2023-06-11","end":"2023-06-16","duration":6,"temp_max":28.3,"start_ms":1686441600000,"end_ms":1686873600000},{"city_id":"brasilia","start":"2023-11-08","end":"2023-11-19","duration":12,"temp_max":34.9,"start_ms":1699401600000,"end_ms":1700352000000},{"city_id":"brasilia","start":"2023-12-13","end":"2023-12-19","duration":7,"temp_max":32.2,"start_ms":1702425600000,"end_ms":1702944000000},{"city_id":"brasilia","start":"2024-06-24","end":"2024-07-01","duration":8,"temp_max":28.1,"start_ms":1719187200000,"end_ms":1719792000000},{"city_id":"brasilia","start":"2024-09-22","end":"2024-09-28","duration":7,"temp_max":34.5,"start_ms":1726963200000,"end_ms":1727481600000},{"city_id":"brasilia","start":"2024-12-06","end":"2024-12-11","duration":6,"temp_max":31.1,"start_ms":1733443200000,"end_ms":1733875200000},{"city_id":"brasilia","start":"2025-02-17","end":"2025-02-23","duration":7,"temp_max":32.6,"start_ms":1739750400000,"end_ms":1740268800000},{"city_id":"brasilia","start":"2025-03-08","end":"2025-03-20","duration":13,"temp_max":31.9,"start_ms":1741392000000,"end_ms":1742428800000},{"city_id":"curitiba","start":"1963-01-02","end":"1963-01-07","duration":6,"temp_max":32.6,"start_ms":-220838400000,"end_ms":-220406400000},{"city_id":"curitiba","start":"1963-08-29","end":"1963-09-07","duration":10,"temp_max":32.6,"start_ms":-200188800000,"end_ms":-199411200000},{"city_id":"curitiba","start":"1963-11-24","end":"1963-11-29","duration":6,"temp_max":33.0,"start_ms":-192672000000,"end_ms":-192240000000},{"city_id":"curitiba","start":"1966-03-14","end":"1966-03-21","duration":8,"temp_max":31.2,"start_ms":-120009600000,"end_ms":-119404800000},{"city_id":"curitiba","start":"1967-05-23","end":"1967-05-28","duration":6,"temp_max":26.8,"start_ms":-82425600000,"end_ms":-81993600000},{"city_id":"curitiba","start":"1968-11-01","end":"1968-11-06","duration":6,"temp_max":32.6,"start_ms":-36806400000,"end_ms":-36374400000},{"city_id":"curitiba","start":"1971-01-23","end":"1971-01-29","duration":7,"temp_max":34.0,"start_ms":33436800000,"end_ms":33955200000},{"city_id":"curitiba","start":"1972-05-09","end":"1972-05-18","duration":10,"temp_max":28.3,"start_ms":74217600000,"end_ms":74995200000},{"city_id":"curitiba","start":"1972-06-25","end":"1972-07-02","duration":8,"temp_max":28.2,"start_ms":78278400000,"end_ms":78883200000},{"city_id":"curitiba","start":"1975-02-11","end":"1975-02-17","duration":7,"temp_max":34.8,"start_ms":161308800000,"end_ms":161827200000},{"city_id":"curitiba","start":"1977-07-26","end":"1977-08-01","duration":7,"temp_max":27.6,"start_ms":238723200000,"end_ms":239241600000},{"city_id":"curitiba","start":"1978-02-13","end":"1978-02-18","duration":6,"temp_max":32.2,"start_ms":256176000000,"end_ms":256608000000},{"city_id":"curitiba","start":"1984-02-12","end":"1984-02-17","duration":6,"temp_max":31.5,"start_ms":445392000000,"end_ms":445824000000},{"city_id":"curitiba","start":"1984-02-20","end":"1984-02-25","duration":6,"temp_max":33.7,"start_ms":446083200000,"end_ms":446515200000},{"city_id":"curitiba","start":"1984-05-19","end":"1984-05-27","duration":9,"temp_max":26.4,"start_ms":453772800000,"end_ms":454464000000},{"city_id":"curitiba","start":"1985-11-12","end":"1985-11-17","duration":6,"temp_max":35.2,"start_ms":500601600000,"end_ms":501033600000},{"city_id":"curitiba","start":"1987-07-13","end":"1987-07-18","duration":6,"temp_max":26.9,"start_ms":553132800000,"end_ms":553564800000},{"city_id":"curitiba","start":"1988-03-23","end":"1988-03-28","duration":6,"temp_max":31.0,"start_ms":575078400000,"end_ms":575510400000},{"city_id":"curitiba","start":"1994-07-17","end":"1994-07-22","duration":6,"temp_max":26.6,"start_ms":774403200000,"end_ms":774835200000},{"city_id":"curitiba","start":"2001-05-30","end":"2001-06-06","duration":8,"temp_max":26.7,"start_ms":991180800000,"end_ms":991785600000},{"city_id":"curitiba","start":"2002-03-08","end":"2002-03-13","duration":6,"temp_max":32.5,"start_ms":1015545600000,"end_ms":1015977600000},{"city_id":"curitiba","start":"2002-03-15","end":"2002-03-20","duration":6,"temp_max":32.0,"start_ms":1016150400000,"end_ms":1016582400000},{"city_id":"curitiba","start":"2002-10-06","end":"2002-10-11","duration":6,"temp_max":33.1,"start_ms":1033862400000,"end_ms":1034294400000},{"city_id":"curitiba","start":"2003-02-24","end":"2003-03-03","duration":8,"temp_max":33.4,"start_ms":1046044800000,"end_ms":1046649600000},{"city_id":"curitiba","start":"2005-05-10","end":"2005-05-15","duration":6,"temp_max":28.5,"start_ms":1115683200000,"end_ms":1116115200000},{"city_id":"curitiba","start":"2006-07-22","end":"2006-07-27","duration":6,"temp_max":28.2,"start_ms":1153526400000,"end_ms":1153958400000},{"city_id":"curitiba","start":"2006-08-05","end":"2006-08-15","duration":11,"temp_max":30.8,"start_ms":1154736000000,"end_ms":1155600000000},{"city_id":"curitiba","start":"2007-03-23","end":"2007-03-31","duration":9,"temp_max":33.6,"start_ms":1174608000000,"end_ms":1175299200000},{"city_id":"curitiba","start":"2008-05-19","end":"2008-05-24","duration":6,"temp_max":27.8,"start_ms":1211155200000,"end_ms":1211587200000},{"city_id":"curitiba","start":"2010-02-03","end":"2010-02-08","duration":6,"temp_max":33.5,"start_ms":1265155200000,"end_ms":1265587200000},{"city_id":"curitiba","start":"2014-01-27","end":"2014-02-12","duration":17,"temp_max":34.5,"start_ms":1390780800000,"end_ms":1392163200000},{"city_id":"curitiba","start":"2016-04-14","end":"2016-04-21","duration":8,"temp_max":30.2,"start_ms":1460592000000,"end_ms":1461196800000},{"city_id":"curitiba","start":"2017-02-15","end":"2017-02-20","duration":6,"temp_max":33.6,"start_ms":1487116800000,"end_ms":1487548800000},{"city_id":"curitiba","start":"2018-07-15","end":"2018-07-20","duration":6,"temp_max":27.2,"start_ms":1531612800000,"end_ms":1532044800000},{"city_id":"curitiba","start":"2018-12-10","end":"2018-12-20","duration":11,"temp_max":33.3,"start_ms":1544400000000,"end_ms":1545264000000},{"city_id":"curitiba","start":"2019-01-28","end":"2019-02-02","duration":6,"temp_max":34.5,"start_ms":1548633600000,"end_ms":1549065600000},{"city_id":"curitiba","start":"2022-01-19","end":"2022-01-26","duration":8,"temp_max":33.3,"start_ms":1642550400000,"end_ms":1643155200000},{"city_id":"curitiba","start":"2024-04-27","end":"2024-05-13","duration":17,"temp_max":30.5,"start_ms":1714176000000,"end_ms":1715558400000},{"city_id":"curitiba","start":"2024-08-15","end":"2024-08-20","duration":6,"temp_max":31.4,"start_ms":1723680000000,"end_ms":1724112000000},{"city_id":"curitiba","start":"2024-09-07","end":"2024-09-13","duration":7,"temp_max":33.3,"start_ms":1725667200000,"end_ms":1726185600000},{"city_id":"curitiba","start":"2025-12-22","end":"2025-12-28","duration":7,"temp_max":34.3,"start_ms":1766361600000,"end_ms":1766880000000},{"city_id":"goiania","start":"1963-11-22","end":"1963-11-27","duration":6,"temp_max":35.3,"start_ms":-192844800000,"end_ms":-192412800000},{"city_id":"goiania","start":"1963-12-07","end":"1963-12-12","duration":6,"temp_max":35.4,"start_ms":-191548800000,"end_ms":-191116800000},{"city_id":"goiania","start":"1968-11-03","end":"1968-11-08","duration":6,"temp_max":36.2,"start_ms":-36633600000,"end_ms":-36201600000},{"city_id":"goiania","start":"1973-01-06","end":"1973-01-11","duration":6,"temp_max":35.0,"start_ms":95126400000,"end_ms":95558400000},{"city_id":"goiania","start":"1986-11-20","end":"1986-11-25","duration":6,"temp_max":34.6,"start_ms":532828800000,"end_ms":533260800000},{"city_id":"goiania","start":"1993-03-07","end":"1993-03-14","duration":8,"temp_max":35.5,"start_ms":731462400000,"end_ms":732067200000},{"city_id":"goiania","start":"2003-12-10","end":"2003-12-18","duration":9,"temp_max":36.0,"start_ms":1071014400000,"end_ms":1071705600000},{"city_id":"goiania","start":"2009-02-27","end":"2009-03-06","duration":8,"temp_max":35.0,"start_ms":1235692800000,"end_ms":1236297600000},{"city_id":"goiania","start":"2009-07-25","end":"2009-07-31","duration":7,"temp_max":34.4,"start_ms":1248480000000,"end_ms":1248998400000},{"city_id":"goiania","start":"2010-04-26","end":"2010-05-03","duration":8,"temp_max":33.8,"start_ms":1272240000000,"end_ms":1272844800000},{"city_id":"goiania","start":"2010-05-14","end":"2010-05-19","duration":6,"temp_max":34.9,"start_ms":1273795200000,"end_ms":1274227200000},{"city_id":"goiania","start":"2010-06-16","end":"2010-06-25","duration":10,"temp_max":35.8,"start_ms":1276646400000,"end_ms":1277424000000},{"city_id":"goiania","start":"2012-10-25","end":"2012-10-31","duration":7,"temp_max":38.8,"start_ms":1351123200000,"end_ms":1351641600000},{"city_id":"goiania","start":"2014-10-12","end":"2014-10-19","duration":8,"temp_max":39.6,"start_ms":1413072000000,"end_ms":1413676800000},{"city_id":"goiania","start":"2015-01-07","end":"2015-01-21","duration":15,"temp_max":37.8,"start_ms":1420588800000,"end_ms":1421798400000},{"city_id":"goiania","start":"2015-09-01","end":"2015-09-07","duration":7,"temp_max":37.6,"start_ms":1441065600000,"end_ms":1441584000000},{"city_id":"goiania","start":"2015-10-11","end":"2015-10-22","duration":12,"temp_max":40.4,"start_ms":1444521600000,"end_ms":1445472000000},{"city_id":"goiania","start":"2015-11-07","end":"2015-11-14","duration":8,"temp_max":37.5,"start_ms":1446854400000,"end_ms":1447459200000},{"city_id":"goiania","start":"2016-02-23","end":"2016-02-29","duration":7,"temp_max":35.3,"start_ms":1456185600000,"end_ms":1456704000000},{"city_id":"goiania","start":"2016-03-18","end":"2016-03-23","duration":6,"temp_max":34.7,"start_ms":1458259200000,"end_ms":1458691200000},{"city_id":"goiania","start":"2016-03-28","end":"2016-04-16","duration":20,"temp_max":35.2,"start_ms":1459123200000,"end_ms":1460764800000},{"city_id":"goiania","start":"2016-05-30","end":"2016-06-07","duration":9,"temp_max":34.9,"start_ms":1464566400000,"end_ms":1465257600000},{"city_id":"goiania","start":"2016-07-06","end":"2016-07-16","duration":11,"temp_max":34.0,"start_ms":1467763200000,"end_ms":1468627200000},{"city_id":"goiania","start":"2017-08-09","end":"2017-08-17","duration":9,"temp_max":36.0,"start_ms":1502236800000,"end_ms":1502928000000},{"city_id":"goiania","start":"2017-10-10","end":"2017-10-16","duration":7,"temp_max":39.8,"start_ms":1507593600000,"end_ms":1508112000000},{"city_id":"goiania","start":"2018-12-15","end":"2018-12-21","duration":7,"temp_max":36.7,"start_ms":1544832000000,"end_ms":1545350400000},{"city_id":"goiania","start":"2019-01-28","end":"2019-02-03","duration":7,"temp_max":36.5,"start_ms":1548633600000,"end_ms":1549152000000},{"city_id":"goiania","start":"2019-05-26","end":"2019-06-02","duration":8,"temp_max":33.4,"start_ms":1558828800000,"end_ms":1559433600000},{"city_id":"goiania","start":"2019-08-31","end":"2019-09-05","duration":6,"temp_max":38.4,"start_ms":1567209600000,"end_ms":1567641600000},{"city_id":"goiania","start":"2019-09-16","end":"2019-09-22","duration":7,"temp_max":39.3,"start_ms":1568592000000,"end_ms":1569110400000},{"city_id":"goiania","start":"2019-11-09","end":"2019-11-14","duration":6,"temp_max":37.8,"start_ms":1573257600000,"end_ms":1573689600000},{"city_id":"goiania","start":"2020-01-10","end":"2020-01-16","duration":7,"temp_max":35.9,"start_ms":1578614400000,"end_ms":1579132800000},{"city_id":"goiania","start":"2020-09-27","end":"2020-10-09","duration":13,"temp_max":41.2,"start_ms":1601164800000,"end_ms":1602201600000},{"city_id":"goiania","start":"2022-05-29","end":"2022-06-04","duration":7,"temp_max":34.1,"start_ms":1653782400000,"end_ms":1654300800000},{"city_id":"goiania","start":"2023-08-06","end":"2023-08-12","duration":7,"temp_max":35.5,"start_ms":1691280000000,"end_ms":1691798400000},{"city_id":"goiania","start":"2023-11-09","end":"2023-11-19","duration":11,"temp_max":39.7,"start_ms":1699488000000,"end_ms":1700352000000},{"city_id":"goiania","start":"2023-12-13","end":"2023-12-18","duration":6,"temp_max":37.2,"start_ms":1702425600000,"end_ms":1702857600000},{"city_id":"goiania","start":"2024-02-25","end":"2024-03-01","duration":6,"temp_max":34.8,"start_ms":1708819200000,"end_ms":1709251200000},{"city_id":"goiania","start":"2024-04-26","end":"2024-05-04","duration":9,"temp_max":33.8,"start_ms":1714089600000,"end_ms":1714780800000},{"city_id":"goiania","start":"2024-09-21","end":"2024-09-28","duration":8,"temp_max":39.0,"start_ms":1726876800000,"end_ms":1727481600000},{"city_id":"goiania","start":"2024-10-02","end":"2024-10-08","duration":7,"temp_max":41.1,"start_ms":1727827200000,"end_ms":1728345600000},{"city_id":"manaus","start":"1983-01-13","end":"1983-01-18","duration":6,"temp_max":34.8,"start_ms":411264000000,"end_ms":411696000000},{"city_id":"manaus","start":"1983-02-22","end":"1983-03-06","duration":13,"temp_max":36.2,"start_ms":414720000000,"end_ms":415756800000},{"city_id":"manaus","start":"1997-10-12","end":"1997-10-17","duration":6,"temp_max":38.0,"start_ms":876614400000,"end_ms":877046400000},{"city_id":"manaus","start":"2007-02-14","end":"2007-02-20","duration":7,"temp_max":35.5,"start_ms":1171411200000,"end_ms":1171929600000},{"city_id":"manaus","start":"2007-06-25","end":"2007-06-30","duration":6,"temp_max":34.9,"start_ms":1182729600000,"end_ms":1183161600000},{"city_id":"manaus","start":"2009-11-17","end":"2009-12-04","duration":18,"temp_max":37.3,"start_ms":1258416000000,"end_ms":1259884800000},{"city_id":"manaus","start":"2010-03-06","end":"2010-03-14","duration":9,"temp_max":35.9,"start_ms":1267833600000,"end_ms":1268524800000},{"city_id":"manaus","start":"2011-07-29","end":"2011-08-04","duration":7,"temp_max":36.2,"start_ms":1311897600000,"end_ms":1312416000000},{"city_id":"manaus","start":"2013-06-16","end":"2013-06-21","duration":6,"temp_max":34.3,"start_ms":1371340800000,"end_ms":1371772800000},{"city_id":"manaus","start":"2015-09-05","end":"2015-09-13","duration":9,"temp_max":38.6,"start_ms":1441411200000,"end_ms":1442102400000},{"city_id":"manaus","start":"2015-09-16","end":"2015-10-01","duration":16,"temp_max":39.0,"start_ms":1442361600000,"end_ms":1443657600000},{"city_id":"manaus","start":"2016-01-08","end":"2016-01-19","duration":12,"temp_max":37.0,"start_ms":1452211200000,"end_ms":1453161600000},{"city_id":"manaus","start":"2018-07-04","end":"2018-07-09","duration":6,"temp_max":34.4,"start_ms":1530662400000,"end_ms":1531094400000},{"city_id":"manaus","start":"2020-08-14","end":"2020-08-21","duration":8,"temp_max":36.7,"start_ms":1597363200000,"end_ms":1597968000000},{"city_id":"manaus","start":"2023-07-23","end":"2023-08-01","duration":10,"temp_max":36.5,"start_ms":1690070400000,"end_ms":1690848000000},{"city_id":"manaus","start":"2023-08-23","end":"2023-08-30","duration":8,"temp_max":38.0,"start_ms":1692748800000,"end_ms":1693353600000},{"city_id":"manaus","start":"2023-09-01","end":"2023-09-06","duration":6,"temp_max":38.8,"start_ms":1693526400000,"end_ms":1693958400000},{"city_id":"manaus","start":"2023-09-29","end":"2023-10-13","duration":15,"temp_max":40.0,"start_ms":1695945600000,"end_ms":1697155200000},{"city_id":"manaus","start":"2023-10-25","end":"2023-10-30","duration":6,"temp_max":38.1,"start_ms":1698192000000,"end_ms":1698624000000},{"city_id":"manaus","start":"2023-11-01","end":"2023-11-06","duration":6,"temp_max":38.5,"start_ms":1698796800000,"end_ms":1699228800000},{"city_id":"manaus","start":"2023-11-09","end":"2023-11-15","duration":7,"temp_max":38.1,"start_ms":1699488000000,"end_ms":1700006400000},{"city_id":"manaus","start":"2024-01-17","end":"2024-01-22","duration":6,"temp_max":35.1,"start_ms":1705449600000,"end_ms":1705881600000},{"city_id":"manaus","start":"2024-02-19","end":"2024-02-24","duration":6,"temp_max":36.2,"start_ms":1708300800000,"end_ms":1708732800000},{"city_id":"manaus","start":"2024-07-04","end":"2024-07-09","duration":6,"temp_max":35.1,"start_ms":1720051200000,"end_ms":1720483200000},{"city_id":"manaus","start":"2024-07-27","end":"2024-08-02","duration":7,"temp_max":35.7,"start_ms":1722038400000,"end_ms":1722556800000},{"city_id":"manaus","start":"2024-08-20","end":"2024-08-25","duration":6,"temp_max":36.6,"start_ms":1724112000000,"end_ms":1724544000000},{"city_id":"manaus","start":"2024-08-31","end":"2024-09-05","duration":6,"temp_max":37.8,"start_ms":1725062400000,"end_ms":1725494400000},{"city_id":"manaus","start":"2024-09-07","end":"2024-09-18","duration":12,"temp_max":39.0,"start_ms":1725667200000,"end_ms":1726617600000},{"city_id":"porto_alegre","start":"1967-05-13","end":"1967-05-18","duration":6,"temp_max":31.0,"start_ms":-83289600000,"end_ms":-82857600000},{"city_id":"porto_alegre","start":"1970-02-26","end":"1970-03-04","duration":7,"temp_max":36.0,"start_ms":4838400000,"end_ms":5356800000},{"city_id":"porto_alegre","start":"1970-04-20","end":"1970-04-25","duration":6,"temp_max":33.5,"start_ms":9417600000,"end_ms":9849600000},{"city_id":"porto_alegre","start":"1988-03-21","end":"1988-03-27","duration":7,"temp_max":37.9,"start_ms":574905600000,"end_ms":575424000000},{"city_id":"porto_alegre","start":"1991-05-26","end":"1991-06-03","duration":9,"temp_max":32.7,"start_ms":675216000000,"end_ms":675907200000},{"city_id":"porto_alegre","start":"1995-11-04","end":"1995-11-09","duration":6,"temp_max":36.3,"start_ms":815443200000,"end_ms":815875200000},{"city_id":"porto_alegre","start":"2001-05-31","end":"2001-06-05","duration":6,"temp_max":30.6,"start_ms":991267200000,"end_ms":991699200000},{"city_id":"porto_alegre","start":"2005-06-01","end":"2005-06-08","duration":8,"temp_max":29.4,"start_ms":1117584000000,"end_ms":1118188800000},{"city_id":"porto_alegre","start":"2005-07-30","end":"2005-08-05","duration":7,"temp_max":32.2,"start_ms":1122681600000,"end_ms":1123200000000},{"city_id":"porto_alegre","start":"2007-09-08","end":"2007-09-14","duration":7,"temp_max":33.8,"start_ms":1189209600000,"end_ms":1189728000000},{"city_id":"porto_alegre","start":"2010-02-02","end":"2010-02-07","duration":6,"temp_max":39.0,"start_ms":1265068800000,"end_ms":1265500800000},{"city_id":"porto_alegre","start":"2012-02-14","end":"2012-02-21","duration":8,"temp_max":39.0,"start_ms":1329177600000,"end_ms":1329782400000},{"city_id":"porto_alegre","start":"2012-06-27","end":"2012-07-02","duration":6,"temp_max":31.1,"start_ms":1340755200000,"end_ms":1341187200000},{"city_id":"porto_alegre","start":"2014-01-17","end":"2014-01-24","duration":8,"temp_max":37.6,"start_ms":1389916800000,"end_ms":1390521600000},{"city_id":"porto_alegre","start":"2014-02-02","end":"2014-02-07","duration":6,"temp_max":40.6,"start_ms":1391299200000,"end_ms":1391731200000},{"city_id":"porto_alegre","start":"2019-01-26","end":"2019-01-31","duration":6,"temp_max":38.4,"start_ms":1548460800000,"end_ms":1548892800000},{"city_id":"porto_alegre","start":"2019-06-11","end":"2019-06-16","duration":6,"temp_max":30.3,"start_ms":1560211200000,"end_ms":1560643200000},{"city_id":"porto_alegre","start":"2019-12-27","end":"2020-01-01","duration":6,"temp_max":40.3,"start_ms":1577404800000,"end_ms":1577836800000},{"city_id":"porto_alegre","start":"2022-01-19","end":"2022-01-26","duration":8,"temp_max":39.5,"start_ms":1642550400000,"end_ms":1643155200000},{"city_id":"porto_alegre","start":"2023-03-14","end":"2023-03-20","duration":7,"temp_max":35.5,"start_ms":1678752000000,"end_ms":1679270400000},{"city_id":"porto_alegre","start":"2023-12-13","end":"2023-12-18","duration":6,"temp_max":38.4,"start_ms":1702425600000,"end_ms":1702857600000},{"city_id":"porto_alegre","start":"2025-03-02","end":"2025-03-08","duration":7,"temp_max":38.3,"start_ms":1740873600000,"end_ms":1741392000000},{"city_id":"salvador","start":"1997-11-29","end":"1997-12-06","duration":8,"temp_max":33.1,"start_ms":880761600000,"end_ms":881366400000},{"city_id":"salvador","start":"2006-02-07","end":"2006-02-12","duration":6,"temp_max":33.9,"start_ms":1139270400000,"end_ms":1139702400000},{"city_id":"salvador","start":"2006-02-20","end":"2006-02-28","duration":9,"temp_max":34.7,"start_ms":1140393600000,"end_ms":1141084800000},{"city_id":"salvador","start":"2008-09-12","end":"2008-09-17","duration":6,"temp_max":30.2,"start_ms":1221177600000,"end_ms":1221609600000},{"city_id":"salvador","start":"2008-10-24","end":"2008-10-29","duration":6,"temp_max":31.3,"start_ms":1224806400000,"end_ms":1225238400000},{"city_id":"salvador","start":"2008-11-12","end":"2008-11-19","duration":8,"temp_max":32.5,"start_ms":1226448000000,"end_ms":1227052800000},{"city_id":"salvador","start":"2010-02-15","end":"2010-02-20","duration":6,"temp_max":33.9,"start_ms":1266192000000,"end_ms":1266624000000},{"city_id":"salvador","start":"2013-01-04","end":"2013-01-11","duration":8,"temp_max":33.4,"start_ms":1357257600000,"end_ms":1357862400000},{"city_id":"salvador","start":"2013-01-31","end":"2013-02-07","duration":8,"temp_max":33.6,"start_ms":1359590400000,"end_ms":1360195200000},{"city_id":"salvador","start":"2013-02-14","end":"2013-02-19","duration":6,"temp_max":33.6,"start_ms":1360800000000,"end_ms":1361232000000},{"city_id":"salvador","start":"2013-03-21","end":"2013-03-28","duration":8,"temp_max":34.0,"start_ms":1363824000000,"end_ms":1364428800000},{"city_id":"salvador","start":"2013-04-04","end":"2013-04-16","duration":13,"temp_max":34.2,"start_ms":1365033600000,"end_ms":1366070400000},{"city_id":"salvador","start":"2016-08-14","end":"2016-08-19","duration":6,"temp_max":30.0,"start_ms":1471132800000,"end_ms":1471564800000},{"city_id":"salvador","start":"2017-01-10","end":"2017-01-15","duration":6,"temp_max":33.3,"start_ms":1484006400000,"end_ms":1484438400000},{"city_id":"salvador","start":"2018-07-19","end":"2018-07-26","duration":8,"temp_max":28.6,"start_ms":1531958400000,"end_ms":1532563200000},{"city_id":"salvador","start":"2018-07-28","end":"2018-08-03","duration":7,"temp_max":29.7,"start_ms":1532736000000,"end_ms":1533254400000},{"city_id":"salvador","start":"2018-08-05","end":"2018-08-18","duration":14,"temp_max":30.3,"start_ms":1533427200000,"end_ms":1534550400000},{"city_id":"salvador","start":"2018-08-21","end":"2018-08-26","duration":6,"temp_max":29.5,"start_ms":1534809600000,"end_ms":1535241600000},{"city_id":"salvador","start":"2018-09-18","end":"2018-09-28","duration":11,"temp_max":30.6,"start_ms":1537228800000,"end_ms":1538092800000},{"city_id":"salvador","start":"2019-02-26","end":"2019-03-03","duration":6,"temp_max":34.5,"start_ms":1551139200000,"end_ms":1551571200000},{"city_id":"salvador","start":"2019-03-08","end":"2019-03-13","duration":6,"temp_max":33.9,"start_ms":1552003200000,"end_ms":1552435200000},{"city_id":"salvador","start":"2019-03-15","end":"2019-03-20","duration":6,"temp_max":34.2,"start_ms":1552608000000,"end_ms":1553040000000},{"city_id":"salvador","start":"2019-04-29","end":"2019-05-05","duration":7,"temp_max":32.0,"start_ms":1556496000000,"end_ms":1557014400000},{"city_id":"salvador","start":"2019-05-21","end":"2019-05-28","duration":8,"temp_max":30.7,"start_ms":1558396800000,"end_ms":1559001600000},{"city_id":"salvador","start":"2020-10-08","end":"2020-10-14","duration":7,"temp_max":32.6,"start_ms":1602115200000,"end_ms":1602633600000},{"city_id":"salvador","start":"2021-09-09","end":"2021-09-16","duration":8,"temp_max":29.7,"start_ms":1631145600000,"end_ms":1631750400000},{"city_id":"salvador","start":"2021-10-01","end":"2021-10-06","duration":6,"temp_max":30.9,"start_ms":1633046400000,"end_ms":1633478400000},{"city_id":"salvador","start":"2021-10-08","end":"2021-10-19","duration":12,"temp_max":32.0,"start_ms":1633651200000,"end_ms":1634601600000},{"city_id":"salvador","start":"2022-10-03","end":"2022-10-11","duration":9,"temp_max":31.0,"start_ms":1664755200000,"end_ms":1665446400000},{"city_id":"salvador","start":"2023-04-18","end":"2023-04-23","duration":6,"temp_max":34.1,"start_ms":1681776000000,"end_ms":1682208000000},{"city_id":"salvador","start":"2023-08-19","end":"2023-08-29","duration":11,"temp_max":30.6,"start_ms":1692403200000,"end_ms":1693267200000},{"city_id":"salvador","start":"2023-09-12","end":"2023-09-17","duration":6,"temp_max":29.7,"start_ms":1694476800000,"end_ms":1694908800000},{"city_id":"salvador","start":"2023-10-08","end":"2023-10-14","duration":7,"temp_max":31.9,"start_ms":1696723200000,"end_ms":1697241600000},{"city_id":"salvador","start":"2023-10-25","end":"2023-10-30","duration":6,"temp_max":32.8,"start_ms":1698192000000,"end_ms":1698624000000},{"city_id":"salvador","start":"2023-12-08","end":"2023-12-13","duration":6,"temp_max":33.2,"start_ms":1701993600000,"end_ms":1702425600000},{"city_id":"salvador","start":"2023-12-24","end":"2024-01-01","duration":9,"temp_max":33.1,"start_ms":1703376000000,"end_ms":1704067200000},{"city_id":"salvador","start":"2024-01-06","end":"2024-01-18","duration":13,"temp_max":34.0,"start_ms":1704499200000,"end_ms":1705536000000},{"city_id":"salvador","start":"2024-06-06","end":"2024-06-11","duration":6,"temp_max":29.4,"start_ms":1717632000000,"end_ms":1718064000000},{"city_id":"salvador","start":"2024-06-17","end":"2024-06-22","duration":6,"temp_max":28.9,"start_ms":1718582400000,"end_ms":1719014400000},{"city_id":"salvador","start":"2024-07-07","end":"2024-07-20","duration":14,"temp_max":29.4,"start_ms":1720310400000,"end_ms":1721433600000},{"city_id":"salvador","start":"2024-08-21","end":"2024-08-28","duration":8,"temp_max":29.5,"start_ms":1724198400000,"end_ms":1724803200000},{"city_id":"salvador","start":"2024-10-07","end":"2024-10-13","duration":7,"temp_max":31.8,"start_ms":1728259200000,"end_ms":1728777600000},{"city_id":"salvador","start":"2024-10-20","end":"2024-11-02","duration":14,"temp_max":32.2,"start_ms":1729382400000,"end_ms":1730505600000},{"city_id":"salvador","start":"2025-08-09","end":"2025-08-15","duration":7,"temp_max":29.3,"start_ms":1754697600000,"end_ms":1755216000000},{"city_id":"sao_paulo","start":"1972-06-04","end":"1972-06-10","duration":7,"temp_max":28.3,"start_ms":76464000000,"end_ms":76982400000},{"city_id":"sao_paulo","start":"1984-05-05","end":"1984-05-10","duration":6,"temp_max":29.7,"start_ms":452563200000,"end_ms":452995200000},{"city_id":"sao_paulo","start":"1984-05-19","end":"1984-05-29","duration":11,"temp_max":28.3,"start_ms":453772800000,"end_ms":454636800000},{"city_id":"sao_paulo","start":"1985-11-12","end":"1985-11-17","duration":6,"temp_max":35.3,"start_ms":500601600000,"end_ms":501033600000},{"city_id":"sao_paulo","start":"1987-07-13","end":"1987-07-18","duration":6,"temp_max":29.3,"start_ms":553132800000,"end_ms":553564800000},{"city_id":"sao_paulo","start":"1987-08-11","end":"1987-08-16","duration":6,"temp_max":32.0,"start_ms":555638400000,"end_ms":556070400000},{"city_id":"sao_paulo","start":"1999-01-18","end":"1999-01-25","duration":8,"temp_max":37.0,"start_ms":916617600000,"end_ms":917222400000},{"city_id":"sao_paulo","start":"1999-03-25","end":"1999-03-30","duration":6,"temp_max":34.0,"start_ms":922320000000,"end_ms":922752000000},{"city_id":"sao_paulo","start":"2001-05-31","end":"2001-06-05","duration":6,"temp_max":28.1,"start_ms":991267200000,"end_ms":991699200000},{"city_id":"sao_paulo","start":"2002-06-08","end":"2002-06-14","duration":7,"temp_max":28.4,"start_ms":1023494400000,"end_ms":1024012800000},{"city_id":"sao_paulo","start":"2002-10-05","end":"2002-10-12","duration":8,"temp_max":35.7,"start_ms":1033776000000,"end_ms":1034380800000},{"city_id":"sao_paulo","start":"2003-02-24","end":"2003-03-03","duration":8,"temp_max":34.1,"start_ms":1046044800000,"end_ms":1046649600000},{"city_id":"sao_paulo","start":"2003-04-25","end":"2003-05-01","duration":7,"temp_max":30.8,"start_ms":1051228800000,"end_ms":1051747200000},{"city_id":"sao_paulo","start":"2005-03-08","end":"2005-03-13","duration":6,"temp_max":33.3,"start_ms":1110240000000,"end_ms":1110672000000},{"city_id":"sao_paulo","start":"2005-05-11","end":"2005-05-16","duration":6,"temp_max":29.8,"start_ms":1115769600000,"end_ms":1116201600000},{"city_id":"sao_paulo","start":"2006-07-23","end":"2006-07-28","duration":6,"temp_max":30.2,"start_ms":1153612800000,"end_ms":1154044800000},{"city_id":"sao_paulo","start":"2007-03-05","end":"2007-03-10","duration":6,"temp_max":33.3,"start_ms":1173052800000,"end_ms":1173484800000},{"city_id":"sao_paulo","start":"2007-03-26","end":"2007-04-03","duration":9,"temp_max":33.1,"start_ms":1174867200000,"end_ms":1175558400000},{"city_id":"sao_paulo","start":"2008-05-18","end":"2008-05-23","duration":6,"temp_max":27.7,"start_ms":1211068800000,"end_ms":1211500800000},{"city_id":"sao_paulo","start":"2014-01-27","end":"2014-02-13","duration":18,"temp_max":36.4,"start_ms":1390780800000,"end_ms":1392249600000},{"city_id":"sao_paulo","start":"2014-03-14","end":"2014-03-21","duration":8,"temp_max":33.5,"start_ms":1394755200000,"end_ms":1395360000000},{"city_id":"sao_paulo","start":"2015-01-07","end":"2015-01-20","duration":14,"temp_max":36.5,"start_ms":1420588800000,"end_ms":1421712000000},{"city_id":"sao_paulo","start":"2015-09-16","end":"2015-09-24","duration":9,"temp_max":35.5,"start_ms":1442361600000,"end_ms":1443052800000},{"city_id":"sao_paulo","start":"2016-04-12","end":"2016-04-25","duration":14,"temp_max":32.4,"start_ms":1460419200000,"end_ms":1461542400000},{"city_id":"sao_paulo","start":"2023-03-20","end":"2023-03-26","duration":7,"temp_max":32.6,"start_ms":1679270400000,"end_ms":1679788800000},{"city_id":"sao_paulo","start":"2023-09-22","end":"2023-09-27","duration":6,"temp_max":36.4,"start_ms":1695340800000,"end_ms":1695772800000},{"city_id":"sao_paulo","start":"2023-11-08","end":"2023-11-15","duration":8,"temp_max":37.5,"start_ms":1699401600000,"end_ms":1700006400000},{"city_id":"sao_paulo","start":"2024-03-13","end":"2024-03-21","duration":9,"temp_max":34.2,"start_ms":1710288000000,"end_ms":1710979200000},{"city_id":"sao_paulo","start":"2024-04-27","end":"2024-05-13","duration":17,"temp_max":32.6,"start_ms":1714176000000,"end_ms":1715558400000},{"city_id":"sao_paulo","start":"2024-09-07","end":"2024-09-13","duration":7,"temp_max":34.2,"start_ms":1725667200000,"end_ms":1726185600000},{"city_id":"sao_paulo","start":"2025-02-15","end":"2025-02-20","duration":6,"temp_max":34.0,"start_ms":1739577600000,"end_ms":1740009600000},{"city_id":"sao_paulo","start":"2025-02-24","end":"2025-03-03","duration":8,"temp_max":34.7,"start_ms":1740355200000,"end_ms":1740960000000},{"city_id":"sao_paulo","start":"2025-12-21","end":"2025-12-30","duration":10,"temp_max":37.2,"start_ms":1766275200000,"end_ms":1767052800000},{"city_id":"belem","start":"1969-12-01","end":"1969-12-08","duration":8,"temp_max":35.0,"start_ms":-2678400000,"end_ms":-2073600000},{"city_id":"belem","start":"1969-12-10","end":"1969-12-22","duration":13,"temp_max":35.0,"start_ms":-1900800000,"end_ms":-864000000},{"city_id":"belem","start":"1969-12-27","end":"1970-01-02","duration":7,"temp_max":36.0,"start_ms":-432000000,"end_ms":86400000},{"city_id":"belem","start":"1970-01-05","end":"1970-01-11","duration":7,"temp_max":35.9,"start_ms":345600000,"end_ms":864000000},{"city_id":"belem","start":"1970-04-03","end":"1970-04-09","duration":7,"temp_max":34.8,"start_ms":7948800000,"end_ms":8467200000},{"city_id":"belem","start":"1998-02-04","end":"1998-02-15","duration":12,"temp_max":34.6,"start_ms":886550400000,"end_ms":887500800000},{"city_id":"belem","start":"2005-01-02","end":"2005-01-10","duration":9,"temp_max":34.7,"start_ms":1104624000000,"end_ms":1105315200000},{"city_id":"belem","start":"2005-03-06","end":"2005-03-11","duration":6,"temp_max":34.0,"start_ms":1110067200000,"end_ms":1110499200000},{"city_id":"belem","start":"2010-03-01","end":"2010-03-12","duration":12,"temp_max":34.4,"start_ms":1267401600000,"end_ms":1268352000000},{"city_id":"belem","start":"2014-11-20","end":"2014-11-26","duration":7,"temp_max":35.4,"start_ms":1416441600000,"end_ms":1416960000000},{"city_id":"belem","start":"2014-12-18","end":"2014-12-28","duration":11,"temp_max":35.1,"start_ms":1418860800000,"end_ms":1419724800000},{"city_id":"belem","start":"2015-02-11","end":"2015-02-16","duration":6,"temp_max":34.5,"start_ms":1423612800000,"end_ms":1424044800000},{"city_id":"belem","start":"2016-04-23","end":"2016-05-01","duration":9,"temp_max":34.7,"start_ms":1461369600000,"end_ms":1462060800000},{"city_id":"belem","start":"2017-07-13","end":"2017-07-21","duration":9,"temp_max":35.2,"start_ms":1499904000000,"end_ms":1500595200000},{"city_id":"belem","start":"2017-09-06","end":"2017-09-14","duration":9,"temp_max":35.6,"start_ms":1504656000000,"end_ms":1505347200000},{"city_id":"belem","start":"2018-06-27","end":"2018-07-03","duration":7,"temp_max":34.9,"start_ms":1530057600000,"end_ms":1530576000000},{"city_id":"belem","start":"2019-06-26","end":"2019-07-01","duration":6,"temp_max":34.4,"start_ms":1561507200000,"end_ms":1561939200000},{"city_id":"belem","start":"2019-08-09","end":"2019-08-14","duration":6,"temp_max":35.2,"start_ms":1565308800000,"end_ms":1565740800000},{"city_id":"belem","start":"2020-05-24","end":"2020-05-29","duration":6,"temp_max":35.1,"start_ms":1590278400000,"end_ms":1590710400000},{"city_id":"belem","start":"2020-07-01","end":"2020-07-19","duration":19,"temp_max":35.5,"start_ms":1593561600000,"end_ms":1595116800000},{"city_id":"belem","start":"2020-07-23","end":"2020-08-24","duration":33,"temp_max":37.0,"start_ms":1595462400000,"end_ms":1598227200000},{"city_id":"belem","start":"2020-08-26","end":"2020-09-10","duration":16,"temp_max":36.1,"start_ms":1598400000000,"end_ms":1599696000000},{"city_id":"belem","start":"2020-09-12","end":"2020-09-21","duration":10,"temp_max":35.8,"start_ms":1599868800000,"end_ms":1600646400000},{"city_id":"belem","start":"2020-09-26","end":"2020-10-02","duration":7,"temp_max":35.0,"start_ms":1601078400000,"end_ms":1601596800000},{"city_id":"belem","start":"2021-01-06","end":"2021-01-11","duration":6,"temp_max":34.5,"start_ms":1609891200000,"end_ms":1610323200000},{"city_id":"belem","start":"2021-02-02","end":"2021-02-08","duration":7,"temp_max":34.1,"start_ms":1612224000000,"end_ms":1612742400000},{"city_id":"belem","start":"2022-07-23","end":"2022-07-28","duration":6,"temp_max":35.7,"start_ms":1658534400000,"end_ms":1658966400000},{"city_id":"belem","start":"2022-08-09","end":"2022-08-20","duration":12,"temp_max":35.6,"start_ms":1660003200000,"end_ms":1660953600000},{"city_id":"belem","start":"2023-05-05","end":"2023-05-10","duration":6,"temp_max":34.7,"start_ms":1683244800000,"end_ms":1683676800000},{"city_id":"belem","start":"2023-07-21","end":"2023-08-03","duration":14,"temp_max":35.6,"start_ms":1689897600000,"end_ms":1691020800000},{"city_id":"belem","start":"2023-08-11","end":"2023-08-20","duration":10,"temp_max":35.7,"start_ms":1691712000000,"end_ms":1692489600000},{"city_id":"belem","start":"2023-08-23","end":"2023-09-05","duration":14,"temp_max":35.7,"start_ms":1692748800000,"end_ms":1693872000000},{"city_id":"belem","start":"2023-09-07","end":"2023-09-15","duration":9,"temp_max":35.8,"start_ms":1694044800000,"end_ms":1694736000000},{"city_id":"belem","start":"2023-09-23","end":"2023-10-11","duration":19,"temp_max":36.6,"start_ms":1695427200000,"end_ms":1696982400000},{"city_id":"belem","start":"2023-10-18","end":"2023-10-28","duration":11,"temp_max":35.7,"start_ms":1697587200000,"end_ms":1698451200000},{"city_id":"belem","start":"2023-10-30","end":"2023-11-04","duration":6,"temp_max":35.9,"start_ms":1698624000000,"end_ms":1699056000000},{"city_id":"belem","start":"2023-11-10","end":"2023-11-19","duration":10,"temp_max":35.7,"start_ms":1699574400000,"end_ms":1700352000000},{"city_id":"belem","start":"2024-01-14","end":"2024-02-01","duration":19,"temp_max":36.0,"start_ms":1705190400000,"end_ms":1706745600000},{"city_id":"belem","start":"2024-02-03","end":"2024-02-09","duration":7,"temp_max":35.8,"start_ms":1706918400000,"end_ms":1707436800000},{"city_id":"belem","start":"2024-03-06","end":"2024-03-14","duration":9,"temp_max":34.5,"start_ms":1709683200000,"end_ms":1710374400000},{"city_id":"belem","start":"2024-07-13","end":"2024-08-01","duration":20,"temp_max":35.8,"start_ms":1720828800000,"end_ms":1722470400000},{"city_id":"belem","start":"2024-08-04","end":"2024-08-11","duration":8,"temp_max":37.2,"start_ms":1722729600000,"end_ms":1723334400000},{"city_id":"belem","start":"2024-08-23","end":"2024-09-29","duration":38,"temp_max":38.1,"start_ms":1724371200000,"end_ms":1727568000000},{"city_id":"belem","start":"2024-10-04","end":"2024-10-14","duration":11,"temp_max":37.4,"start_ms":1728000000000,"end_ms":1728864000000},{"city_id":"belem","start":"2024-10-17","end":"2024-10-29","duration":13,"temp_max":36.7,"start_ms":1729123200000,"end_ms":1730160000000},{"city_id":"belem","start":"2024-10-31","end":"2024-11-10","duration":11,"temp_max":37.9,"start_ms":1730332800000,"end_ms":1731196800000},{"city_id":"belem","start":"2024-11-19","end":"2024-12-04","duration":16,"temp_max":36.9,"start_ms":1731974400000,"end_ms":1733270400000},{"city_id":"belem","start":"2025-04-30","end":"2025-05-06","duration":7,"temp_max":35.5,"start_ms":1745971200000,"end_ms":1746489600000},{"city_id":"belo_horizonte","start":"1961-11-20","end":"1961-11-28","duration":9,"temp_max":33.6,"start_ms":-256089600000,"end_ms":-255398400000},{"city_id":"belo_horizonte","start":"1963-03-20","end":"1963-03-28","duration":9,"temp_max":33.4,"start_ms":-214185600000,"end_ms":-213494400000},{"city_id":"belo_horizonte","start":"1963-12-06","end":"1963-12-13","duration":8,"temp_max":34.4,"start_ms":-191635200000,"end_ms":-191030400000},{"city_id":"belo_horizonte","start":"1969-01-02","end":"1969-01-12","duration":11,"temp_max":34.8,"start_ms":-31449600000,"end_ms":-30585600000},{"city_id":"belo_horizonte","start":"1969-05-22","end":"1969-05-28","duration":7,"temp_max":29.0,"start_ms":-19353600000,"end_ms":-18835200000},{"city_id":"belo_horizonte","start":"1971-04-14","end":"1971-04-19","duration":6,"temp_max":31.2,"start_ms":40435200000,"end_ms":40867200000},{"city_id":"belo_horizonte","start":"1973-04-03","end":"1973-04-09","duration":7,"temp_max":31.2,"start_ms":102643200000,"end_ms":103161600000},{"city_id":"belo_horizonte","start":"1973-04-14","end":"1973-04-20","duration":7,"temp_max":31.8,"start_ms":103593600000,"end_ms":104112000000},{"city_id":"belo_horizonte","start":"1973-04-24","end":"1973-04-29","duration":6,"temp_max":31.0,"start_ms":104457600000,"end_ms":104889600000},{"city_id":"belo_horizonte","start":"1973-06-21","end":"1973-06-27","duration":7,"temp_max":30.0,"start_ms":109468800000,"end_ms":109987200000},{"city_id":"belo_horizonte","start":"1977-07-13","end":"1977-07-18","duration":6,"temp_max":29.0,"start_ms":237600000000,"end_ms":238032000000},{"city_id":"belo_horizonte","start":"1982-11-21","end":"1982-12-01","duration":11,"temp_max":33.8,"start_ms":406684800000,"end_ms":407548800000},{"city_id":"belo_horizonte","start":"1983-07-06","end":"1983-07-12","duration":7,"temp_max":29.2,"start_ms":426297600000,"end_ms":426816000000},{"city_id":"belo_horizonte","start":"1984-01-12","end":"1984-01-17","duration":6,"temp_max":34.2,"start_ms":442713600000,"end_ms":443145600000},{"city_id":"belo_horizonte","start":"1984-02-14","end":"1984-02-19","duration":6,"temp_max":32.7,"start_ms":445564800000,"end_ms":445996800000},{"city_id":"belo_horizonte","start":"1984-02-26","end":"1984-03-05","duration":9,"temp_max":32.9,"start_ms":446601600000,"end_ms":447292800000},{"city_id":"belo_horizonte","start":"1984-05-07","end":"1984-05-16","duration":10,"temp_max":31.2,"start_ms":452736000000,"end_ms":453513600000},{"city_id":"belo_horizonte","start":"1984-05-19","end":"1984-05-31","duration":13,"temp_max":30.2,"start_ms":453772800000,"end_ms":454809600000},{"city_id":"belo_horizonte","start":"1984-06-05","end":"1984-06-10","duration":6,"temp_max":29.2,"start_ms":455241600000,"end_ms":455673600000},{"city_id":"belo_horizonte","start":"1986-03-14","end":"1986-03-19","duration":6,"temp_max":33.4,"start_ms":511142400000,"end_ms":511574400000},{"city_id":"belo_horizonte","start":"1987-05-04","end":"1987-05-09","duration":6,"temp_max":30.8,"start_ms":547084800000,"end_ms":547516800000},{"city_id":"belo_horizonte","start":"1987-08-11","end":"1987-08-18","duration":8,"temp_max":32.7,"start_ms":555638400000,"end_ms":556243200000},{"city_id":"belo_horizonte","start":"1988-05-19","end":"1988-05-24","duration":6,"temp_max":29.9,"start_ms":580003200000,"end_ms":580435200000},{"city_id":"belo_horizonte","start":"1998-01-31","end":"1998-02-07","duration":8,"temp_max":35.2,"start_ms":886204800000,"end_ms":886809600000},{"city_id":"belo_horizonte","start":"2002-08-02","end":"2002-08-07","duration":6,"temp_max":32.1,"start_ms":1028246400000,"end_ms":1028678400000},{"city_id":"belo_horizonte","start":"2003-04-27","end":"2003-05-02","duration":6,"temp_max":30.4,"start_ms":1051401600000,"end_ms":1051833600000},{"city_id":"belo_horizonte","start":"2007-10-28","end":"2007-11-03","duration":7,"temp_max":34.4,"start_ms":1193529600000,"end_ms":1194048000000},{"city_id":"belo_horizonte","start":"2009-11-22","end":"2009-11-27","duration":6,"temp_max":32.6,"start_ms":1258848000000,"end_ms":1259280000000},{"city_id":"belo_horizonte","start":"2012-10-27","end":"2012-11-01","duration":6,"temp_max":37.1,"start_ms":1351296000000,"end_ms":1351728000000},{"city_id":"belo_horizonte","start":"2014-12-28","end":"2015-01-03","duration":7,"temp_max":33.8,"start_ms":1419724800000,"end_ms":1420243200000},{"city_id":"belo_horizonte","start":"2015-01-17","end":"2015-01-22","duration":6,"temp_max":33.9,"start_ms":1421452800000,"end_ms":1421884800000},{"city_id":"belo_horizonte","start":"2016-07-11","end":"2016-07-16","duration":6,"temp_max":29.9,"start_ms":1468195200000,"end_ms":1468627200000},{"city_id":"belo_horizonte","start":"2017-01-01","end":"2017-01-06","duration":6,"temp_max":33.4,"start_ms":1483228800000,"end_ms":1483660800000},{"city_id":"belo_horizonte","start":"2018-12-18","end":"2018-12-23","duration":6,"temp_max":33.6,"start_ms":1545091200000,"end_ms":1545523200000},{"city_id":"belo_horizonte","start":"2019-01-29","end":"2019-02-03","duration":6,"temp_max":35.0,"start_ms":1548720000000,"end_ms":1549152000000},{"city_id":"belo_horizonte","start":"2019-02-22","end":"2019-02-27","duration":6,"temp_max":34.7,"start_ms":1550793600000,"end_ms":1551225600000},{"city_id":"belo_horizonte","start":"2020-01-08","end":"2020-01-13","duration":6,"temp_max":33.8,"start_ms":1578441600000,"end_ms":1578873600000},{"city_id":"belo_horizonte","start":"2020-09-27","end":"2020-10-03","duration":7,"temp_max":36.5,"start_ms":1601164800000,"end_ms":1601683200000},{"city_id":"belo_horizonte","start":"2020-10-05","end":"2020-10-10","duration":6,"temp_max":36.9,"start_ms":1601856000000,"end_ms":1602288000000},{"city_id":"belo_horizonte","start":"2023-09-23","end":"2023-09-28","duration":6,"temp_max":37.5,"start_ms":1695427200000,"end_ms":1695859200000},{"city_id":"belo_horizonte","start":"2023-11-09","end":"2023-11-19","duration":11,"temp_max":37.3,"start_ms":1699488000000,"end_ms":1700352000000},{"city_id":"belo_horizonte","start":"2024-03-13","end":"2024-03-19","duration":7,"temp_max":33.8,"start_ms":1710288000000,"end_ms":1710806400000},{"city_id":"belo_horizonte","start":"2024-04-28","end":"2024-05-04","duration":7,"temp_max":32.4,"start_ms":1714262400000,"end_ms":1714780800000},{"city_id":"belo_horizonte","start":"2024-06-24","end":"2024-06-30","duration":7,"temp_max":29.3,"start_ms":1719187200000,"end_ms":1719705600000},{"city_id":"belo_horizonte","start":"2024-08-15","end":"2024-08-21","duration":7,"temp_max":32.1,"start_ms":1723680000000,"end_ms":1724198400000},{"city_id":"belo_horizonte","start":"2024-09-01","end":"2024-09-06","duration":6,"temp_max":34.4,"start_ms":1725148800000,"end_ms":1725580800000},{"city_id":"belo_horizonte","start":"2025-01-17","end":"2025-01-23","duration":7,"temp_max":34.4,"start_ms":1737072000000,"end_ms":1737590400000},{"city_id":"belo_horizonte","start":"2025-12-25","end":"2025-12-31","duration":7,"temp_max":34.8,"start_ms":1766620800000,"end_ms":1767139200000}];
+
+var stationEvents = ee.FeatureCollection(STATION_EVENT_ROWS.map(function(r) {
+  return ee.Feature(null, r);
+}));
+
+
+// ============================================================================
+// 3. INPUT COLLECTIONS
+// ============================================================================
+
+var v1 = ee.ImageCollection(V1_ROOT);
+var v2 = ee.ImageCollection(V2_ROOT);
+
+var lulc = ee.Image(URBAN_ASSET);
+var urban2025 = lulc
+  .select('classification_' + URBAN_YEAR)
+  .eq(URBAN_CLASS)
+  .selfMask();
+
+var municipalities = USE_MUNICIPAL_LIMITS
+  ? ee.FeatureCollection(MUNICIPAL_ASSET)
+  : ee.FeatureCollection([]);
+
+print('V1 aggregate images currently available', v1.size());
+print('V2 aggregate images currently available', v2.size());
+print('Station events loaded', stationEvents.size());
+
+
+// ============================================================================
+// 4. FIXED URBAN CENTROID FOR EACH CITY
+// ============================================================================
+
+function municipalityFor(meta) {
+  if (!USE_MUNICIPAL_LIMITS) {
+    return ee.FeatureCollection([]);
+  }
+
+  // Some historical versions store IBGE code as string, others as number.
+  return municipalities.filter(
+    ee.Filter.or(
+      ee.Filter.eq(MUNICIPAL_CODE_FIELD, meta.ibge_code),
+      ee.Filter.eq(MUNICIPAL_CODE_FIELD, parseInt(meta.ibge_code, 10))
+    )
+  );
+}
+
+function urbanCentroid(meta) {
+  var anchor = ee.Geometry.Point([meta.lon, meta.lat]);
+  var fallbackRegion = anchor.buffer(meta.radius_km * 1000);
+
+  var muni = municipalityFor(meta);
+  var region = USE_MUNICIPAL_LIMITS
+    ? ee.Geometry(ee.Algorithms.If(
+        muni.size().gt(0),
+        muni.geometry(),
+        fallbackRegion
+      ))
+    : fallbackRegion;
+
+  var urban = urban2025.clip(region);
+
+  // Area-weighted centroid of the union of urban pixels.
+  var pixelArea = ee.Image.pixelArea().updateMask(urban).rename('area');
+  var lon = ee.Image.pixelLonLat().select('longitude');
+  var lat = ee.Image.pixelLonLat().select('latitude');
+
+  var weighted = ee.Image.cat([
+    lon.multiply(pixelArea).rename('lon_area'),
+    lat.multiply(pixelArea).rename('lat_area'),
+    pixelArea
+  ]);
+
+  var sums = weighted.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e9,
+    tileScale: 4
+  });
+
+  var area = ee.Number(sums.get('area'));
+
+  // Extremely defensive fallback: if no urban pixels are found, use anchor.
+  var hasUrban = area.gt(0);
+  var cx = ee.Number(ee.Algorithms.If(
+    hasUrban,
+    ee.Number(sums.get('lon_area')).divide(area),
+    meta.lon
+  ));
+  var cy = ee.Number(ee.Algorithms.If(
+    hasUrban,
+    ee.Number(sums.get('lat_area')).divide(area),
+    meta.lat
+  ));
+
+  return ee.Feature(ee.Geometry.Point([cx, cy]), {
+    city_id: meta.city_id,
+    city: meta.city,
+    ibge_code: meta.ibge_code,
+    urban_reference_year: URBAN_YEAR,
+    urban_class: URBAN_CLASS,
+    urban_area_m2: ee.Algorithms.If(hasUrban, area, null),
+    municipality_match: muni.size().gt(0),
+    centroid_method: ee.Algorithms.If(
+      hasUrban,
+      'area_weighted_centroid_MapBiomas_urban_2025',
+      'fallback_city_anchor_no_urban_pixels'
+    )
+  });
+}
+
+var centroidFeatures = CITY_META.map(function(meta) {
+  return urbanCentroid(meta);
+});
+
+var centroids = ee.FeatureCollection(centroidFeatures);
+
+print('Urban centroids', centroids);
+
+Map.setOptions('SATELLITE');
+Map.centerObject(centroids, 4);
+Map.addLayer(
+  urban2025,
+  {palette: ['#d4271e']},
+  'MapBiomas urban area 2025',
+  false
+);
+Map.addLayer(
+  centroids.style({color: '000000', pointSize: 6, width: 2}),
+  {},
+  'Urban centroids used for validation',
+  true
+);
+
+
+// ============================================================================
+// 5. STATION METRICS FOR AN ARBITRARY PERIOD
+// ============================================================================
+
+function stationMetrics(cityId, startDate, endDateExclusive) {
+  var startMs = ee.Date(startDate).millis();
+  var endMs = ee.Date(endDateExclusive).millis();
+
+  var events = stationEvents.filter(ee.Filter.eq('city_id', cityId));
+
+  // Allocate event DAYS to their actual dates.
+  var overlapDays = events.map(function(f) {
+    f = ee.Feature(f);
+    var eventStart = ee.Number(f.get('start_ms'));
+    var eventEndExclusive = ee.Number(f.get('end_ms')).add(DAY_MS);
+
+    var overlapStart = eventStart.max(startMs);
+    var overlapEnd = eventEndExclusive.min(endMs);
+
+    var days = overlapEnd
+      .subtract(overlapStart)
+      .divide(DAY_MS)
+      .max(0);
+
+    return f.set('period_overlap_days', days);
+  });
+
+  var heatwaveDays = ee.Number(
+    overlapDays.aggregate_sum('period_overlap_days')
+  );
+
+  // Whole events belong to the period in which the event ENDS.
+  var ended = events
+    .filter(ee.Filter.gte('end_ms', startMs))
+    .filter(ee.Filter.lt('end_ms', endMs));
+
+  var count = ended.size();
+
+  var maxDuration = ee.Algorithms.If(
+    count.gt(0),
+    ended.aggregate_max('duration'),
+    null
+  );
+
+  var meanDuration = ee.Algorithms.If(
+    count.gt(0),
+    ended.aggregate_mean('duration'),
+    null
+  );
+
+  return ee.Dictionary({
+    heatwave_days: heatwaveDays,
+    event_count: count,
+    max_event_duration: maxDuration,
+    mean_event_duration: meanDuration
+  });
+}
+
+
+// ============================================================================
+// 6. SAMPLE ONE MAPBIOMAS AGGREGATED PERIOD AT ONE URBAN CENTROID
+// ============================================================================
+
+function aggregateSubset(ic, year, month) {
+  return ic
+    .filter(ee.Filter.eq('year', year))
+    .filter(ee.Filter.eq('month', month));
+}
+
+function sampleAggregate(ic, year, month, point) {
+  var subset = aggregateSubset(ic, year, month);
+  var available = subset.size().gt(0);
+
+  var values = ee.Dictionary(ee.Algorithms.If(
+    available,
+    ee.Image(subset.first())
+      .select(METRICS)
+      .reduceRegion({
+        reducer: ee.Reducer.first(),
+        geometry: point,
+        scale: SAMPLE_SCALE,
+        maxPixels: 100000,
+        bestEffort: false
+      }),
+    ee.Dictionary({})
+  ));
+
+  return values.set('available', available);
+}
+
+
+// ============================================================================
+// 7. BUILD ONE COMPARISON ROW
+// ============================================================================
+
+function oneComparison(cityFeature, year, month) {
+  cityFeature = ee.Feature(cityFeature);
+  year = ee.Number(year).toInt();
+  month = ee.Number(month).toInt();
+
+  var isAnnual = month.eq(0);
+
+  var start = ee.Date(ee.Algorithms.If(
+    isAnnual,
+    ee.Date.fromYMD(year, 1, 1),
+    ee.Date.fromYMD(year, month, 1)
+  ));
+
+  var end = ee.Date(ee.Algorithms.If(
+    isAnnual,
+    ee.Date.fromYMD(year.add(1), 1, 1),
+    start.advance(1, 'month')
+  ));
+
+  var cityId = ee.String(cityFeature.get('city_id'));
+  var station = stationMetrics(cityId, start, end);
+
+  var v1s = sampleAggregate(v1, year, month, cityFeature.geometry());
+  var v2s = sampleAggregate(v2, year, month, cityFeature.geometry());
+
+  var props = ee.Dictionary({
+    city_id: cityId,
+    city: cityFeature.get('city'),
+    ibge_code: cityFeature.get('ibge_code'),
+    year: year,
+    month: month,
+    period_type: ee.Algorithms.If(isAnnual, 'annual', 'monthly'),
+    period_start: start.format('YYYY-MM-dd'),
+    period_end_exclusive: end.format('YYYY-MM-dd'),
+    urban_reference_year: URBAN_YEAR,
+    centroid_lon: cityFeature.geometry().coordinates().get(0),
+    centroid_lat: cityFeature.geometry().coordinates().get(1),
+    v1_available: v1s.get('available'),
+    v2_available: v2s.get('available')
+  });
+
+  METRICS.forEach(function(metric) {
+    props = props
+      .set('station_' + metric, station.get(metric))
+      .set('v1_' + metric, v1s.get(metric))
+      .set('v2_' + metric, v2s.get(metric));
+  });
+
+  return ee.Feature(cityFeature.geometry(), props)
+    .set('system:time_start', start.millis());
+}
+
+
+// ============================================================================
+// 8. BUILD ANNUAL + MONTHLY COMPARISON TABLES
+// ============================================================================
+
+var years = ee.List.sequence(START_YEAR, END_YEAR);
+var months = ee.List.sequence(1, 12);
+var cityList = centroids.toList(centroids.size());
+
+var annualRows = cityList.map(function(cityObj) {
+  var city = ee.Feature(cityObj);
+  return years.map(function(year) {
+    return oneComparison(city, year, 0);
+  });
+}).flatten();
+
+var annualComparison = ee.FeatureCollection(annualRows);
+
+var monthlyRows = cityList.map(function(cityObj) {
+  var city = ee.Feature(cityObj);
+
+  return years.map(function(year) {
+    return months.map(function(month) {
+      return oneComparison(city, year, month);
+    });
+  }).flatten();
+}).flatten();
+
+var monthlyComparison = ee.FeatureCollection(monthlyRows);
+
+print(
+  'Annual comparison rows (expected 9 x 41 = 369)',
+  annualComparison.size()
+);
+print(
+  'Monthly comparison rows (expected 9 x 41 x 12 = 4428)',
+  monthlyComparison.size()
+);
+
+
+// ============================================================================
+// 9. PERFORMANCE STATISTICS
+// ============================================================================
+
+function statsFeature(fc, cityId, metric, version, periodType) {
+  var observed = 'station_' + metric;
+  var predicted = version + '_' + metric;
+
+  var valid = fc
+    .filter(ee.Filter.eq('city_id', cityId))
+    .filter(ee.Filter.notNull([observed, predicted]))
+    .map(function(f) {
+      f = ee.Feature(f);
+      var obs = ee.Number(f.get(observed));
+      var pred = ee.Number(f.get(predicted));
+      var err = pred.subtract(obs);
+
+      return f.set({
+        _error: err,
+        _abs_error: err.abs(),
+        _sq_error: err.pow(2)
+      });
+    });
+
+  var n = valid.size();
+
+  var corr = ee.Algorithms.If(
+    n.gt(1),
+    valid.reduceColumns(
+      ee.Reducer.pearsonsCorrelation(),
+      [observed, predicted]
+    ).get('correlation'),
+    null
+  );
+
+  var bias = ee.Algorithms.If(
+    n.gt(0),
+    valid.aggregate_mean('_error'),
+    null
+  );
+
+  var mae = ee.Algorithms.If(
+    n.gt(0),
+    valid.aggregate_mean('_abs_error'),
+    null
+  );
+
+  var rmse = ee.Algorithms.If(
+    n.gt(0),
+    ee.Number(valid.aggregate_mean('_sq_error')).sqrt(),
+    null
+  );
+
+  return ee.Feature(null, {
+    city_id: cityId,
+    metric: metric,
+    version: version,
+    period_type: periodType,
+    n: n,
+    pearson_r: corr,
+    bias_model_minus_station: bias,
+    mae: mae,
+    rmse: rmse
+  });
+}
+
+var STAT_ROWS_ANNUAL = [];
+var STAT_ROWS_MONTHLY = [];
+
+CITY_META.forEach(function(city) {
+  METRICS.forEach(function(metric) {
+    ['v1', 'v2'].forEach(function(version) {
+      STAT_ROWS_ANNUAL.push(
+        statsFeature(
+          annualComparison,
+          city.city_id,
+          metric,
+          version,
+          'annual'
+        ).set('city', city.city)
+      );
+
+      STAT_ROWS_MONTHLY.push(
+        statsFeature(
+          monthlyComparison,
+          city.city_id,
+          metric,
+          version,
+          'monthly'
+        ).set('city', city.city)
+      );
+    });
+  });
+});
+
+var annualStats = ee.FeatureCollection(STAT_ROWS_ANNUAL);
+var monthlyStats = ee.FeatureCollection(STAT_ROWS_MONTHLY);
+
+print('ANNUAL performance statistics', annualStats);
+print('MONTHLY performance statistics', monthlyStats);
+
+
+// ============================================================================
+// 10. INTERACTIVE CHART PANEL
+// ============================================================================
+
+var panel = ui.Panel({
+  style: {
+    position: 'top-right',
+    width: '430px',
+    padding: '10px'
+  }
+});
+
+panel.add(ui.Label({
+  value: 'VALIDAÇÃO — ESTAÇÕES × MAPBIOMAS',
+  style: {
+    fontSize: '18px',
+    fontWeight: 'bold',
+    color: '#7f1d1d'
+  }
+}));
+
+panel.add(ui.Label(
+  'Referência espacial: centroide da área urbana MapBiomas 2025 (classe 24).'
+));
+
+var citySelect = ui.Select({
+  items: CITY_META.map(function(c) {
+    return c.city;
+  }),
+  value: 'São Paulo'
+});
+
+var metricLabels = {
+  'Dias com onda de calor': 'heatwave_days',
+  'Número de eventos': 'event_count',
+  'Duração máxima': 'max_event_duration',
+  'Duração média': 'mean_event_duration'
+};
+
+var metricSelect = ui.Select({
+  items: Object.keys(metricLabels),
+  value: 'Dias com onda de calor'
+});
+
+var yearSelect = ui.Select({
+  items: (function() {
+    var out = [];
+    for (var y = START_YEAR; y <= END_YEAR; y++) {
+      out.push(String(y));
+    }
+    return out;
+  })(),
+  value: '2023'
+});
+
+panel.add(ui.Label('Capital'));
+panel.add(citySelect);
+panel.add(ui.Label('Indicador'));
+panel.add(metricSelect);
+panel.add(ui.Label('Ano para o gráfico mensal'));
+panel.add(yearSelect);
+
+var chartBox = ui.Panel();
+panel.add(chartBox);
+
+function cityIdFromName(name) {
+  for (var i = 0; i < CITY_META.length; i++) {
+    if (CITY_META[i].city === name) {
+      return CITY_META[i].city_id;
+    }
+  }
+  return null;
+}
+
+function updateCharts() {
+  chartBox.clear();
+
+  var cityName = citySelect.getValue();
+  var cityId = cityIdFromName(cityName);
+  var metric = metricLabels[metricSelect.getValue()];
+  var selectedYear = parseInt(yearSelect.getValue(), 10);
+
+  var annualCity = annualComparison
+    .filter(ee.Filter.eq('city_id', cityId))
+    .sort('year');
+
+  var annualChart = ui.Chart.feature.byFeature({
+    features: annualCity,
+    xProperty: 'year',
+    yProperties: [
+      'station_' + metric,
+      'v1_' + metric,
+      'v2_' + metric
+    ]
+  }).setOptions({
+    title: cityName + ' — série anual — ' + metricSelect.getValue(),
+    hAxis: {title: 'Ano'},
+    vAxis: {title: metricSelect.getValue()},
+    lineWidth: 2,
+    pointSize: 3,
+    interpolateNulls: false,
+    legend: {position: 'bottom'}
+  });
+
+  chartBox.add(annualChart);
+
+  var monthlyCity = monthlyComparison
+    .filter(ee.Filter.eq('city_id', cityId))
+    .filter(ee.Filter.eq('year', selectedYear))
+    .sort('month');
+
+  var monthlyChart = ui.Chart.feature.byFeature({
+    features: monthlyCity,
+    xProperty: 'month',
+    yProperties: [
+      'station_' + metric,
+      'v1_' + metric,
+      'v2_' + metric
+    ]
+  }).setOptions({
+    title: cityName + ' — mensal ' + selectedYear + ' — ' +
+      metricSelect.getValue(),
+    hAxis: {title: 'Mês', ticks: [
+      {v:1, f:'Jan'}, {v:2, f:'Fev'}, {v:3, f:'Mar'},
+      {v:4, f:'Abr'}, {v:5, f:'Mai'}, {v:6, f:'Jun'},
+      {v:7, f:'Jul'}, {v:8, f:'Ago'}, {v:9, f:'Set'},
+      {v:10, f:'Out'}, {v:11, f:'Nov'}, {v:12, f:'Dez'}
+    ]},
+    vAxis: {title: metricSelect.getValue()},
+    lineWidth: 2,
+    pointSize: 5,
+    interpolateNulls: false,
+    legend: {position: 'bottom'}
+  });
+
+  chartBox.add(monthlyChart);
+
+  var point = centroids.filter(ee.Filter.eq('city_id', cityId)).first();
+  Map.centerObject(point, 9);
+}
+
+citySelect.onChange(updateCharts);
+metricSelect.onChange(updateCharts);
+yearSelect.onChange(updateCharts);
+
+ui.root.add(panel);
+updateCharts();
+
+
+// ============================================================================
+// 11. EXPORT COMPARISON TABLES + STATISTICS
+// ============================================================================
+
+if (CREATE_EXPORT_TASKS) {
+  Export.table.toDrive({
+    collection: annualComparison,
+    description:
+      'Dhemerson_Atmosfera_HW_validation_annual_urban_centroids_1985_2025',
+    fileNamePrefix:
+      'HW_validation_annual_urban_centroids_1985_2025',
+    fileFormat: 'CSV'
+  });
+
+  Export.table.toDrive({
+    collection: monthlyComparison,
+    description:
+      'Dhemerson_Atmosfera_HW_validation_monthly_urban_centroids_1985_2025',
+    fileNamePrefix:
+      'HW_validation_monthly_urban_centroids_1985_2025',
+    fileFormat: 'CSV'
+  });
+
+  Export.table.toDrive({
+    collection: annualStats,
+    description:
+      'Dhemerson_Atmosfera_HW_validation_stats_annual_1985_2025',
+    fileNamePrefix:
+      'HW_validation_stats_annual_1985_2025',
+    fileFormat: 'CSV'
+  });
+
+  Export.table.toDrive({
+    collection: monthlyStats,
+    description:
+      'Dhemerson_Atmosfera_HW_validation_stats_monthly_1985_2025',
+    fileNamePrefix:
+      'HW_validation_stats_monthly_1985_2025',
+    fileFormat: 'CSV'
+  });
+
+  Export.table.toDrive({
+    collection: centroids,
+    description:
+      'Dhemerson_Atmosfera_HW_validation_urban_centroids',
+    fileNamePrefix:
+      'HW_validation_urban_centroids',
+    fileFormat: 'CSV'
+  });
+}
+
+
+// ============================================================================
+// 12. QUICK QC
+// ============================================================================
+
+print(
+  'QC — station Brasília 2015 annual',
+  annualComparison
+    .filter(ee.Filter.eq('city_id', 'brasilia'))
+    .filter(ee.Filter.eq('year', 2015))
+    .first()
+);
+
+print(
+  'QC — São Paulo 2023 monthly rows',
+  monthlyComparison
+    .filter(ee.Filter.eq('city_id', 'sao_paulo'))
+    .filter(ee.Filter.eq('year', 2023))
+    .sort('month')
+);
+
+print(
+  'NOTE',
+  'Station TXT files are event lists. They do not by themselves prove ' +
+  'continuous station-data completeness for years with no listed event. ' +
+  'Confirm station source coverage before treating every absent event as ' +
+  'a verified zero.'
+);

@@ -1,0 +1,9 @@
+TMAX VALIDATION SUMMARY
+
+Daily Pearson r range: 0.663 to 0.959
+Mean bias range: -0.39 to -2.92 °C
+RMSE range: 1.33 to 3.25 °C
+Lowest RMSE: Brasília (1.33 °C)
+Highest RMSE: Goiânia (3.25 °C)
+Best F1 hot day: Porto Alegre (0.756)
+Best F1 WSDI-event day: Porto Alegre (0.724)

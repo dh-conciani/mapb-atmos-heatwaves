@@ -1,0 +1,26 @@
+PDF: report/MapBiomas_Atmosfera_Heatwaves_Accuracy_Factsheet.pdf
+Pages: 8
+Encrypted: False
+Page sizes (pt, rounded):
+  - 960 x 540 (8 page(s))
+Metadata:
+  /Author: anonymous
+  /CreationDate: D:20261014133125+00'00'
+  /Creator: anonymous
+  /Keywords: 
+  /ModDate: D:20261014133125+00'00'
+  /Producer: ReportLab PDF Library - (opensource)
+  /Subject: unspecified
+  /Title: MapBiomas Atmosfera - Analise de acuracia de ondas de calor
+  /Trapped: /False
+Outline items: 0
+Form fields: 0
+Attachments: 0
+Annotations: 0
+
+Fonts (pdffonts, first 25 lines):
+name                                 type              encoding         emb sub uni object ID
+------------------------------------ ----------------- ---------------- --- --- --- ---------
+Helvetica                            Type 1            WinAnsi          no  no  no       2  0
+Helvetica-Bold                       Type 1            WinAnsi          no  no  no       3  0
+Symbol                               Type 1            Symbol           no  no  no       5  0

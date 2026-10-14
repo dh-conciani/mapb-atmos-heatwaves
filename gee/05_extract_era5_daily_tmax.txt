@@ -1,0 +1,156 @@
+// ============================================================================
+// MAPBIOMAS ATMOSFERA — DAILY TMAX VALIDATION INPUT
+// ERA5-Land daily maximum 2 m temperature at the SAME urban-centroid points
+// used in the heat-wave validation.
+//
+// PURPOSE
+//   Export daily ERA5-Land Tmax for 1985-01-01 ... 2025-12-31 at the 9 fixed
+//   urban centroids already used to validate heat-wave products.
+//
+// OUTPUT
+//   9 CSV tasks in Google Drive, one per capital (~14,975 rows each).
+//
+// IMPORTANT
+//   * ERA5-Land source: ECMWF/ERA5_LAND/DAILY_AGGR
+//   * Band: temperature_2m_max
+//   * ERA5 values are Kelvin; export includes Celsius.
+//   * Dates are the Earth Engine / ERA5-Land DAILY_AGGR UTC calendar dates.
+//   * Sampling points are hard-coded from the successful urban-centroid export,
+//     so this script does NOT recompute municipalities or urban centroids.
+// ============================================================================
+
+
+// ----------------------------------------------------------------------------
+// 1. SETTINGS
+// ----------------------------------------------------------------------------
+
+var START_DATE = '1985-01-01';
+var END_DATE_EXCLUSIVE = '2026-01-01';
+
+var ERA5_ID = 'ECMWF/ERA5_LAND/DAILY_AGGR';
+var TMAX_BAND = 'temperature_2m_max';
+var SAMPLE_SCALE = 11132;
+
+var TASK_PREFIX = 'Dhemerson_Atmosfera_';
+
+var CITY_POINTS = [{"city_id":"brasilia","city":"Brasília","lon":-47.94502073132619,"lat":-15.823435130465322},{"city_id":"curitiba","city":"Curitiba","lon":-49.28081728963778,"lat":-25.467236296527435},{"city_id":"goiania","city":"Goiânia","lon":-49.29299733768754,"lat":-16.676796964462245},{"city_id":"manaus","city":"Manaus","lon":-59.99639666933702,"lat":-3.054104000286413},{"city_id":"porto_alegre","city":"Porto Alegre","lon":-51.1743158105611,"lat":-30.062721542388637},{"city_id":"salvador","city":"Salvador","lon":-38.438342585401784,"lat":-12.927412501509613},{"city_id":"sao_paulo","city":"São Paulo","lon":-46.61940046278146,"lat":-23.57543880279628},{"city_id":"belem","city":"Belém","lon":-48.28748648092435,"lat":-1.4272667912690455},{"city_id":"belo_horizonte","city":"Belo Horizonte","lon":-43.96191564768054,"lat":-19.898145094048434}];
+
+
+// ----------------------------------------------------------------------------
+// 2. ERA5-LAND DAILY COLLECTION
+// ----------------------------------------------------------------------------
+
+var era5 = ee.ImageCollection(ERA5_ID)
+  .filterDate(START_DATE, END_DATE_EXCLUSIVE)
+  .select(TMAX_BAND)
+  .sort('system:time_start');
+
+print('ERA5-Land daily images (expected 14975)', era5.size());
+print('First date', ee.Image(era5.first()).date().format('YYYY-MM-dd'));
+print('Last date', ee.Image(era5.sort('system:time_start', false).first())
+  .date().format('YYYY-MM-dd'));
+
+
+// ----------------------------------------------------------------------------
+// 3. EXPORT ONE CAPITAL
+// ----------------------------------------------------------------------------
+
+function buildSeries(meta) {
+  var point = ee.Geometry.Point([meta.lon, meta.lat]);
+
+  // toList is used so each daily image can be converted to one table row.
+  // Keeping one city per export avoids a very large 135k-row computation graph.
+  var imageList = era5.toList(era5.size());
+
+  var rows = imageList.map(function(obj) {
+    var img = ee.Image(obj);
+    var date = img.date();
+
+    var tmaxK = img.reduceRegion({
+      reducer: ee.Reducer.first(),
+      geometry: point,
+      scale: SAMPLE_SCALE,
+      maxPixels: 100000
+    }).get(TMAX_BAND);
+
+    var tmaxC = ee.Algorithms.If(
+      ee.Algorithms.IsEqual(tmaxK, null),
+      null,
+      ee.Number(tmaxK).subtract(273.15)
+    );
+
+    return ee.Feature(null, {
+      date: date.format('YYYY-MM-dd'),
+      year: date.get('year'),
+      month: date.get('month'),
+      day: date.get('day'),
+      city_id: meta.city_id,
+      city: meta.city,
+      centroid_lon: meta.lon,
+      centroid_lat: meta.lat,
+      tmax_era5_k: tmaxK,
+      tmax_era5_c: tmaxC
+    });
+  });
+
+  return ee.FeatureCollection(rows);
+}
+
+
+CITY_POINTS.forEach(function(meta) {
+  var table = buildSeries(meta);
+
+  var cleanName = meta.city_id;
+  var description =
+    TASK_PREFIX + 'ERA5_Tmax_daily_' + cleanName + '_1985_2025';
+
+  var fileName =
+    'ERA5_Tmax_daily_' + cleanName + '_1985_2025';
+
+  print(meta.city + ' — preview', table.limit(3));
+
+  Export.table.toDrive({
+    collection: table,
+    description: description,
+    fileNamePrefix: fileName,
+    fileFormat: 'CSV',
+    selectors: [
+      'date',
+      'year',
+      'month',
+      'day',
+      'city_id',
+      'city',
+      'centroid_lon',
+      'centroid_lat',
+      'tmax_era5_k',
+      'tmax_era5_c'
+    ]
+  });
+});
+
+
+// ----------------------------------------------------------------------------
+// 4. REFERENCE POINTS ON MAP
+// ----------------------------------------------------------------------------
+
+var pointFeatures = ee.FeatureCollection(CITY_POINTS.map(function(meta) {
+  return ee.Feature(
+    ee.Geometry.Point([meta.lon, meta.lat]),
+    {city: meta.city, city_id: meta.city_id}
+  );
+}));
+
+Map.setOptions('SATELLITE');
+Map.centerObject(pointFeatures, 4);
+Map.addLayer(
+  pointFeatures.style({color: 'FFFF00', pointSize: 7, width: 2}),
+  {},
+  'Urban-centroid validation points',
+  true
+);
+
+print(
+  'READY',
+  'Start the 9 table export tasks. Then send the resulting CSVs back to ChatGPT.'
+);

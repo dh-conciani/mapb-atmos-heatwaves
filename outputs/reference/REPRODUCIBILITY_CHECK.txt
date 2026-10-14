@@ -1,0 +1,15 @@
+OK | annual V1 r heatwave_days: got=0.167997 expected=0.167997 tol=1e-05
+OK | annual V2 r heatwave_days: got=0.712518 expected=0.712518 tol=1e-05
+OK | annual V1 RMSE heatwave_days: got=16.203148 expected=16.203148 tol=1e-05
+OK | annual V2 RMSE heatwave_days: got=12.233279 expected=12.233279 tol=1e-05
+OK | monthly V2 r heatwave_days: got=0.593038 expected=0.593038 tol=1e-05
+OK | annual F1 V1: got=0.449339 expected=0.449000 tol=0.002
+OK | annual F1 V2: got=0.686084 expected=0.686000 tol=0.002
+OK | Brasilia daily RMSE: got=1.328115 expected=1.328115 tol=1e-05
+OK | Goiania daily bias: got=-2.918726 expected=-2.918726 tol=1e-05
+OK | Porto Alegre daily r: got=0.958833 expected=0.958833 tol=1e-05
+OK | Porto Alegre F1 hot: got=0.756172 expected=0.756172 tol=1e-05
+OK | Manaus WSDI recall: got=0.817308 expected=0.817308 tol=1e-05
+OK | Salvador WSDI F1: got=0.176211 expected=0.176211 tol=1e-05
+
+All key-result reproducibility checks passed.

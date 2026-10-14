@@ -1,0 +1,10 @@
+system:index,centroid_method,city,city_id,ibge_code,municipality_match,urban_area_m2,urban_class,urban_reference_year,.geo
+0,area_weighted_centroid_MapBiomas_urban_2025,Brasília,brasilia,5300108,1,7.203128392496046E8,24,2025,"{""type"":""Point"",""coordinates"":[-47.94502073132619,-15.823435130465322]}"
+1,area_weighted_centroid_MapBiomas_urban_2025,Curitiba,curitiba,4106902,1,3.3345438190382826E8,24,2025,"{""type"":""Point"",""coordinates"":[-49.28081728963778,-25.467236296527435]}"
+2,area_weighted_centroid_MapBiomas_urban_2025,Goiânia,goiania,5208707,1,3.171305935804144E8,24,2025,"{""type"":""Point"",""coordinates"":[-49.29299733768754,-16.676796964462245]}"
+3,area_weighted_centroid_MapBiomas_urban_2025,Manaus,manaus,1302603,1,2.8272999449560165E8,24,2025,"{""type"":""Point"",""coordinates"":[-59.99639666933702,-3.054104000286413]}"
+4,area_weighted_centroid_MapBiomas_urban_2025,Porto Alegre,porto_alegre,4314902,1,1.91568191645391E8,24,2025,"{""type"":""Point"",""coordinates"":[-51.1743158105611,-30.062721542388637]}"
+5,area_weighted_centroid_MapBiomas_urban_2025,Salvador,salvador,2927408,1,2.043293169628547E8,24,2025,"{""type"":""Point"",""coordinates"":[-38.438342585401784,-12.927412501509613]}"
+6,area_weighted_centroid_MapBiomas_urban_2025,São Paulo,sao_paulo,3550308,1,8.972704519658521E8,24,2025,"{""type"":""Point"",""coordinates"":[-46.61940046278146,-23.57543880279628]}"
+7,area_weighted_centroid_MapBiomas_urban_2025,Belém,belem,1501402,1,1.4536078650207084E8,24,2025,"{""type"":""Point"",""coordinates"":[-48.28748648092435,-1.4272667912690455]}"
+8,area_weighted_centroid_MapBiomas_urban_2025,Belo Horizonte,belo_horizonte,3106200,1,2.745005986357871E8,24,2025,"{""type"":""Point"",""coordinates"":[-43.96191564768054,-19.898145094048434]}"

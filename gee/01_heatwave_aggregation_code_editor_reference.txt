@@ -1,0 +1,241 @@
+/*
+ MAPBIOMAS HEATWAVES V2 — GEE CODE EDITOR PREVIEW v0.3
+ ------------------------------------------------------
+ PASTE INTO https://code.earthengine.google.com/ AND CLICK RUN.
+ Produces four indicators for one month AND its entire year (8 map layers).
+ No exports or assets are created.
+
+ DATA: existing MapBiomas daily binary membership (0/1), based on Tmax >
+ calendar-day TX90 for >=6 consecutive days (1991-2020 reference period).
+ The detection itself is NOT recalculated here.
+
+ CALENDAR / EVENT RULES (MapBiomas-derived, not four official WMO indices):
+ 1. heatwave_days: affected days assigned to their actual UTC month/year.
+ 2. event_count: each distinct COMPLETE heatwave counted once on its END date.
+ 3. max_event_duration: longest FULL event ENDING in that month/year.
+ 4. mean_event_duration: mean FULL duration of events ENDING in that period.
+
+ Events do not restart on the first day of a new month or year. An event
+ Dec 29-Jan 5 contributes 3 days to December and 5 to January, but ONE
+ complete 8-day event to January's count, maximum and mean.
+
+ A zero on the day AFTER the reporting period is needed to close an event
+ ending on the period's last day. We scan one day beyond period end.
+ A preceding zero confirms that the beginning of an event is visible.
+ If a completed event may start before the lookback, qc_censored_event=1;
+ all event-based metrics are masked for that pixel/period. Day counts stay.
+ A period with no completed events has event_count=0; max/mean are masked.
+ Missing source dates are NOT interpreted as non-heatwave days. The script
+ checks all expected midnight-UTC dates (and duplicates) before mapping.
+
+ NOTE: An incomplete source time series or an event still ongoing at its end
+ cannot be used for finalized reporting. Choose a fully observed month/year.
+ The source itself uses unmask(0); this test can check missing date-assets,
+ not distinguish missing weather inputs already encoded as zeros in an asset.
+*/
+
+// ---- 1. USER SETTINGS -----------------------------------------------------
+var DAILY_ASSET =
+  'projects/mapbiomas-brazil/assets/DEGRADATION/COLLECTION-11/' +
+  'CLIMATIC_WAVES/heatWaves_v2';
+var BAND = 'heat_wave';
+var YEAR = 2023;
+var MONTH = 1;             // 1-12; monthly and annual previews use this YEAR
+var LOOKBACK_DAYS = 366;  // incoming events longer than this are QC-flagged
+var FIRST_AVAILABLE = ee.Date('1985-01-01');
+
+// Deliberately small first preview; edit bounds or replace with an ROI.
+var ROI = ee.Geometry.Rectangle([-55, -19, -47, -11], null, false);
+
+// GEE Code Editor uses Google basemaps — NO geemap / OpenStreetMap tiles.
+Map.setOptions('SATELLITE');
+Map.centerObject(ROI, 6);
+Map.addLayer(ROI, {color: 'white'}, 'Test area', false);
+
+var daily = ee.ImageCollection(DAILY_ASSET);
+var monthStart = ee.Date.fromYMD(YEAR, MONTH, 1);
+var monthEnd = monthStart.advance(1, 'month'); // exclusive
+var yearStart = ee.Date.fromYMD(YEAR, 1, 1);
+var yearEnd = yearStart.advance(1, 'year');     // exclusive
+
+function contextStart(start) {
+  var candidate = start.advance(-LOOKBACK_DAYS, 'day');
+  return ee.Date(ee.Algorithms.If(
+    candidate.millis().lt(FIRST_AVAILABLE.millis()),
+    FIRST_AVAILABLE, candidate
+  ));
+}
+
+// ---- 2. COMPUTE ONE PERIOD ------------------------------------------------
+// Uses ImageCollection.iterate() because each day's event run length depends
+// on the previous day. Every variable inside step() stays SERVER-SIDE.
+function aggregatePeriod(start, endExclusive, name) {
+  // Also include the first day AFTER endExclusive, to close an event that
+  // finished on the reporting period's last calendar day.
+  var subset = daily
+    .filterDate(contextStart(start), endExclusive.advance(1, 'day'))
+    .select(BAND)
+    .sort('system:time_start');
+
+  var zero = ee.Image.constant(0).toInt32().clip(ROI);
+  var initial = ee.Dictionary({
+    prev: zero,
+    openRun: zero,
+    seenZero: zero,
+    days: zero,
+    events: zero,
+    durationSum: zero,
+    maxDuration: zero,
+    censored: zero
+  });
+
+  function step(image, accumulator) {
+    image = ee.Image(image);
+    var a = ee.Dictionary(accumulator);
+    var date = ee.Date(image.get('system:time_start'));
+    var yesterday = date.advance(-1, 'day');
+
+    var current = image.select(BAND).unmask(0).eq(1).toInt32().clip(ROI);
+    var previous = ee.Image(a.get('prev'));
+    var run = ee.Image(a.get('openRun'));
+    var seenZero = ee.Image(a.get('seenZero'));
+
+    // 0/1 SERVER-SIDE constant: is today's date within this report?
+    var dayInPeriod = ee.Image.constant(
+      ee.Number(date.millis().gte(start.millis()))
+        .multiply(ee.Number(date.millis().lt(endExclusive.millis())))
+    ).toInt32();
+
+    // When current=0 and previous=1, the event END date is yesterday.
+    var endInPeriod = ee.Image.constant(
+      ee.Number(yesterday.millis().gte(start.millis()))
+        .multiply(ee.Number(yesterday.millis().lt(endExclusive.millis())))
+    ).toInt32();
+    var endedYesterday = previous.and(current.not()).toInt32();
+    var confirmedEnd = endedYesterday.and(seenZero).multiply(endInPeriod);
+    var uncertainEnd = endedYesterday.and(seenZero.not())
+      .multiply(endInPeriod);
+
+    return ee.Dictionary({
+      prev: current,
+      openRun: run.add(1).multiply(current).toInt32(),
+      seenZero: seenZero.or(current.not()).toInt32(),
+      days: ee.Image(a.get('days')).add(current.multiply(dayInPeriod)),
+      events: ee.Image(a.get('events')).add(confirmedEnd),
+      durationSum: ee.Image(a.get('durationSum'))
+        .add(run.multiply(confirmedEnd)),
+      maxDuration: ee.Image(a.get('maxDuration'))
+        .max(run.multiply(confirmedEnd)),
+      censored: ee.Image(a.get('censored')).or(uncertainEnd).toInt32()
+    });
+  }
+
+  var result = ee.Dictionary(subset.iterate(step, initial));
+  var count = ee.Image(result.get('events'));
+  var totalDuration = ee.Image(result.get('durationSum'));
+  var censored = ee.Image(result.get('censored'));
+  var valid = censored.eq(0);
+  var hasCompletedEvents = count.gt(0).and(valid);
+
+  return ee.Image.cat([
+    ee.Image(result.get('days')).rename('heatwave_days').toInt16(),
+    count.rename('event_count').toInt16().updateMask(valid),
+    ee.Image(result.get('maxDuration')).rename('max_event_duration')
+      .toInt16().updateMask(hasCompletedEvents),
+    totalDuration.divide(count.where(count.eq(0), 1))
+      .rename('mean_event_duration').toFloat()
+      .updateMask(hasCompletedEvents),
+    censored.rename('qc_censored_event').toUint8()
+  ]).clip(ROI).set({
+    'system:time_start': start.millis(),
+    'period_name': name,
+    'period_start_utc': start.format('YYYY-MM-dd'),
+    'period_end_exclusive_utc': endExclusive.format('YYYY-MM-dd'),
+    'day_attribution': 'actual_UTC_calendar_day',
+    'event_attribution': 'full_event_at_UTC_end_date',
+    'cross_month_year_continuity': true,
+    'no_completed_events': 'event_count_0_max_and_mean_masked',
+    'left_censored_events': 'event_metrics_masked_if_qc_1',
+    'lookback_days_requested': LOOKBACK_DAYS,
+    'one_day_after_period_required': true,
+    'source': DAILY_ASSET,
+    'preview_only': true
+  });
+}
+
+// ---- 3. CHECK REQUIRED INPUT DATES BEFORE SHOWING RESULTS -----------------
+// The annual window contains the selected month's entire window, so only
+// ONE continuity check is needed for these two preview periods.
+var first = contextStart(yearStart);
+var afterLast = yearEnd.advance(1, 'day');
+var source = daily.filterDate(first, afterLast);
+var expectedNumber = afterLast.difference(first, 'day').toInt();
+var expectedTimes = ee.List.sequence(0, expectedNumber.subtract(1))
+  .map(function(offset) {
+    return first.advance(ee.Number(offset), 'day').millis();
+  });
+var observedTimes = ee.List(source.aggregate_array('system:time_start'));
+var uniqueTimes = observedTimes.distinct();
+var missingTimes = expectedTimes.removeAll(uniqueTimes);
+var unexpectedTimes = uniqueTimes.removeAll(expectedTimes);
+var duplicateCount = source.size().subtract(uniqueTimes.size());
+
+print('Daily asset timestamp QC (wait for result)', ee.Dictionary({
+  expected: expectedNumber,
+  found: source.size(),
+  missing: missingTimes.size(),
+  unexpected: unexpectedTimes.size(),
+  duplicates: duplicateCount,
+  first_ten_missing_UTC_millis: missingTimes.slice(0, 10)
+}));
+
+var qc = ee.Dictionary({
+  missing: missingTimes.size(),
+  unexpected: unexpectedTimes.size(),
+  duplicates: duplicateCount
+});
+
+qc.evaluate(function(info, error) {
+  if (error) {
+    print('QC could not run. Check collection permissions:', error);
+    return;
+  }
+  if (info.missing || info.unexpected || info.duplicates) {
+    print('STOP: missing/duplicate/unexpected input dates. Fix daily inputs.', info);
+    return;
+  }
+  print('QC passed: daily dates continuous, unique and at UTC midnight.');
+
+  // ---- 4. EIGHT INDICATOR LAYERS -----------------------------------------
+  // NOTE: the annual computation uses >700 daily images. Start with the
+  // small ROI, and enable ONE indicator layer at a time in Layers.
+  var monthly = aggregatePeriod(monthStart, monthEnd,
+                                YEAR + '-' + ('0' + MONTH).slice(-2));
+  var annual = aggregatePeriod(yearStart, yearEnd, String(YEAR));
+  var palette = ['f7fbff', 'c6dbef', '6baed6', '2171b5', '08306b'];
+  var displays = [
+    ['heatwave_days',       {min: 0, max: 30, palette: palette}],
+    ['event_count',         {min: 0, max:  6, palette: palette}],
+    ['max_event_duration',  {min: 6, max: 40, palette: palette}],
+    ['mean_event_duration', {min: 6, max: 25, palette: palette}]
+  ];
+
+  displays.forEach(function(item, index) {
+    Map.addLayer(monthly.select(item[0]), item[1],
+      'MONTH ' + YEAR + '-' + ('0' + MONTH).slice(-2) + ' | ' + item[0],
+      index === 0);
+  });
+  displays.forEach(function(item) {
+    Map.addLayer(annual.select(item[0]), item[1],
+      'YEAR ' + YEAR + ' | ' + item[0], false);
+  });
+  Map.addLayer(monthly.select('qc_censored_event'),
+    {min: 0, max: 1, palette: ['ffffff', 'ff0000']}, 'MONTH | QC', false);
+  Map.addLayer(annual.select('qc_censored_event'),
+    {min: 0, max: 1, palette: ['ffffff', 'ff0000']}, 'YEAR | QC', false);
+
+  print('Monthly output (five bands)', monthly);
+  print('Annual output (five bands)', annual);
+  print('Showing monthly heatwave days. Switch layers with the Layers control.');
+  print('Transparent max/mean pixels can mean no completed event or QC masking.');
+});

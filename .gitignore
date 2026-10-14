@@ -1,0 +1,30 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Matplotlib / local caches
+.cache/
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Temporary patch/install files
+MapBiomas_Heatwaves_Report_v2_patch*/
+*.zip
+
+# Temporary PDF/render folders
+_pdf_render/
+render/
+renders/
+tmp/
+temp/
+
+# Local build artifacts
+outputs/generated/**/plots/tmp/

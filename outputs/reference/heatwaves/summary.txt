@@ -1,0 +1,13 @@
+HEATWAVE PRODUCT VALIDATION SUMMARY
+
+Annual heatwave_days:
+V1 r=0.168, RMSE=16.20, bias=-4.64
+V2 r=0.713, RMSE=12.23, bias=+0.95
+Annual occurrence F1: V1=0.449, V2=0.686
+Annual occurrence recall: V1=0.357, V2=0.741
+
+Monthly heatwave_days:
+V1 r=0.273, RMSE=2.47, bias=-0.39
+V2 r=0.593, RMSE=2.33, bias=+0.08
+Monthly occurrence F1: V1=0.277, V2=0.498
+Monthly occurrence recall: V1=0.201, V2=0.523
